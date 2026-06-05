@@ -1,0 +1,219 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Island</title>
+  <style>
+    * { margin:0; padding:0; box-sizing:border-box; }
+    body { overflow:hidden; background:#04101e; font-family:Georgia,serif; }
+    canvas#c { display:block; position:fixed; inset:0; }
+
+    #loading {
+      position:fixed; inset:0; background:#04101e; z-index:200;
+      display:flex; flex-direction:column; align-items:center; justify-content:center;
+      color:#fff; letter-spacing:3px;
+    }
+    #loading h1 { font-size:18px; font-weight:normal; margin-bottom:18px; }
+    #loading .sub { font:11px/1 monospace; opacity:.4; margin-top:8px; }
+    #loading .track { width:200px; height:1px; background:rgba(255,255,255,.12); margin-top:16px; }
+    #loading .fill  { height:1px; background:rgba(255,255,255,.65); width:0%; transition:width .3s; }
+
+    #hud { position:fixed; inset:0; pointer-events:none; z-index:10; }
+    #title { position:absolute; top:14px; left:50%; transform:translateX(-50%);
+      font-size:16px; letter-spacing:5px; color:rgba(255,255,255,.9);
+      background:rgba(0,0,0,.32); padding:7px 22px; border-radius:7px; backdrop-filter:blur(8px); }
+    #time  { position:absolute; bottom:18px; left:50%; transform:translateX(-50%);
+      font:12px/1 monospace; color:rgba(255,255,255,.75);
+      background:rgba(0,0,0,.32); padding:5px 14px; border-radius:6px; backdrop-filter:blur(6px); }
+    #area  { position:absolute; top:52px; left:50%; transform:translateX(-50%);
+      font-size:12px; letter-spacing:2px; color:rgba(255,255,255,.6);
+      background:rgba(0,0,0,.28); padding:5px 16px; border-radius:5px; backdrop-filter:blur(6px);
+      transition:opacity .5s; opacity:0; }
+    #stats { position:absolute; top:14px; right:14px;
+      font:10px/2 monospace; color:rgba(255,255,255,.7);
+      background:rgba(0,0,0,.32); padding:6px 12px; border-radius:7px; backdrop-filter:blur(6px); }
+    #interact { position:absolute; bottom:22px; right:22px; pointer-events:auto;
+      width:52px; height:52px; border-radius:50%;
+      background:rgba(255,255,255,.18); border:2px solid rgba(255,255,255,.45);
+      color:#fff; font-size:18px; display:flex; align-items:center; justify-content:center;
+      cursor:pointer; user-select:none; }
+  </style>
+</head>
+<body>
+  <div id="loading">
+    <h1>ISLAND</h1>
+    <div class="sub" id="lstatus">initialising…</div>
+    <div class="track"><div class="fill" id="lfill"></div></div>
+  </div>
+
+  <canvas id="c"></canvas>
+
+  <div id="hud">
+    <div id="title">ISLAND</div>
+    <div id="time">08:00</div>
+    <div id="area"></div>
+    <div id="stats"></div>
+    <div id="interact" title="Interact (E)">E</div>
+  </div>
+
+  <script type="importmap">
+  { "imports": {
+    "three":          "https://cdn.jsdelivr.net/npm/three@0.162/build/three.module.js",
+    "three/addons/":  "https://cdn.jsdelivr.net/npm/three@0.162/examples/jsm/"
+  } }
+  </script>
+
+  <script type="module">
+    import { World, VS, S, SEA_LEVEL, CX, CZ } from './engine/world.js';
+    import { Renderer }      from './engine/renderer.js';
+    import { ChunkLoader }   from './engine/chunkloader.js';
+    import { Water }         from './engine/water.js';
+    import { DayNight }      from './engine/daynight.js';
+    import { Input }         from './engine/input.js';
+    import { Player }        from './engine/player.js';
+    import { EntityManager, Seagull, Sheep, Deer, Whale, Boat } from './engine/entities.js';
+    import { populateWorld, AREAS } from './game/island.js';
+
+    const lstatus = document.getElementById('lstatus');
+    const lfill   = document.getElementById('lfill');
+    const areaEl  = document.getElementById('area');
+    const statsEl = document.getElementById('stats');
+
+    function setStatus(msg, pct) {
+      lstatus.textContent = msg;
+      lfill.style.width = pct + '%';
+    }
+
+    function defer(fn, pct) {
+      return new Promise(r => setTimeout(() => { fn(); lfill.style.width = pct+'%'; r(); }, 16));
+    }
+
+    // ── Boot ──────────────────────────────────────────────────────────────────
+    const canvas = document.getElementById('c');
+
+    setStatus('creating renderer…', 5);
+    const renderer  = new Renderer(canvas);
+    const world     = new World();
+    const input     = new Input(canvas);
+    const entities  = new EntityManager();
+
+    setStatus('generating terrain…', 10);
+    await defer(() => {}, 10);
+
+    // Preload spawn area synchronously
+    setStatus('loading spawn chunks…', 15);
+    const loader = new ChunkLoader(world, renderer);
+    await defer(() => loader.preloadSync(CX, CZ, 4), 40);
+
+    // Populate island features
+    setStatus('placing buildings & landscape…', 42);
+    const interactables = await new Promise(r => setTimeout(() => r(populateWorld(world)), 16));
+    lfill.style.width = '65%';
+
+    // Re-mesh chunks dirtied by island placement
+    setStatus('re-meshing world features…', 65);
+    await defer(() => loader.preloadSync(CX, CZ, 5), 80);
+
+    // Water & sky
+    setStatus('initialising sky…', 82);
+    const water   = new Water(renderer.scene, 640, SEA_LEVEL, VS);
+    water.setCenter(CX * VS, CZ * VS);
+    const dayNight = new DayNight(renderer, water, CX * VS, CZ * VS);
+
+    // Player
+    setStatus('spawning player…', 88);
+    const player = new Player(world, renderer, input);
+    player.spawnAt(CX, CZ);
+
+    // Lantern lights at key spots
+    for (const area of Object.values(AREAS)) {
+      const wx = CX + area.x * S, wz = CZ + area.z * S;
+      const wy = world.getSurfaceY(Math.round(wx), Math.round(wz));
+      renderer.addLanternLight(wx, wy + S*4, wz);
+    }
+
+    // Wildlife
+    setStatus('spawning wildlife…', 92);
+    // Seagulls — around dock
+    for (let i=0;i<5;i++) entities.add(new Seagull(renderer.scene, CX+(-8+Math.random()*16), 26+Math.random()*8, CZ+(S*106+Math.random()*6)));
+    for (let i=0;i<3;i++) entities.add(new Seagull(renderer.scene, CX+(-14+Math.random()*28), 22, CZ+(-22+Math.random()*44)));
+    // Sheep on farm
+    for (let i=0;i<6;i++) entities.add(new Sheep(renderer.scene, world, -78+(-14+Math.random()*28), 44+(-10+Math.random()*20)));
+    // Deer in forest
+    for (let i=0;i<3;i++) entities.add(new Deer(renderer.scene, world, 56+Math.random()*26, 44+Math.random()*30));
+    // Whale
+    entities.add(new Whale(renderer.scene, CX, CZ, SEA_LEVEL*VS));
+    // Boats
+    entities.add(new Boat(renderer.scene, -8, 106, 0xcc2a18, false, SEA_LEVEL*VS));
+    entities.add(new Boat(renderer.scene, 10, 110, 0xf5f0e8, true,  SEA_LEVEL*VS));
+
+    // Interact button
+    document.getElementById('interact').addEventListener('click', () => input._pressed.add('interact'));
+
+    lfill.style.width = '100%';
+    setStatus('ready', 100);
+    await new Promise(r => setTimeout(r, 300));
+    document.getElementById('loading').style.display = 'none';
+
+    // ── Area proximity detection ───────────────────────────────────────────────
+    let _lastArea = '', _areaTimer = 0;
+    function checkArea() {
+      const px = player.position.x / VS - CX;
+      const pz = player.position.z / VS - CZ;
+      let closest = null, closestDist = S * 20;
+      for (const [, area] of Object.entries(AREAS)) {
+        const d = Math.sqrt((px - area.x*S)**2 + (pz - area.z*S)**2);
+        if (d < closestDist) { closestDist = d; closest = area; }
+      }
+      if (closest && closest.label !== _lastArea) {
+        _lastArea = closest.label;
+        areaEl.textContent = closest.label;
+        areaEl.style.opacity = '1';
+        _areaTimer = 3;
+      }
+    }
+
+    // ── Game loop ─────────────────────────────────────────────────────────────
+    let last = 0, fps = 60, fpsA = 0, fpsN = 0;
+    const VIEW_DIST = 8;
+
+    function loop(now) {
+      requestAnimationFrame(loop);
+      const dt = Math.min((now - last) / 1000, 0.1);
+      last = now;
+
+      // FPS counter
+      fpsA += dt; fpsN++;
+      if (fpsA >= 1) { fps = Math.round(fpsN / fpsA); fpsA = 0; fpsN = 0; }
+
+      input.update();
+      player.update(dt);
+      entities.update(dt, now);
+      water.update(dt);
+      dayNight.update(dt);
+
+      // Chunk streaming — feed player position in voxel coords
+      loader.tick(player.position.x / VS, player.position.z / VS, VIEW_DIST);
+
+      renderer.frustumCull();
+      renderer.render();
+
+      // Area label fade
+      if (_areaTimer > 0) {
+        _areaTimer -= dt;
+        if (_areaTimer <= 0) areaEl.style.opacity = '0';
+      }
+      checkArea();
+
+      statsEl.textContent =
+        `${fps} fps\n` +
+        `chunks: ${renderer.chunkMeshes.size}\n` +
+        `entities: ${entities.entities.length}\n` +
+        `${Math.round(player.position.x/VS-CX)},${Math.round(player.position.z/VS-CZ)}`;
+    }
+
+    requestAnimationFrame(loop);
+  </script>
+</body>
+</html>

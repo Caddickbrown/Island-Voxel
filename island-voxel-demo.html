@@ -1,0 +1,698 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Island</title>
+  <style>
+    * { margin:0; padding:0; box-sizing:border-box; }
+    body { overflow:hidden; background:#04101e; }
+    canvas { display:block; }
+    #loading {
+      position:fixed; inset:0; background:#04101e;
+      display:flex; flex-direction:column; align-items:center; justify-content:center;
+      color:#fff; font:15px/2.4 Georgia,serif; letter-spacing:3px; z-index:100;
+    }
+    #loading .sub { font-size:11px; opacity:0.4; font-family:monospace; letter-spacing:1px; margin-top:6px; }
+    #loading .track { width:180px; height:1px; background:rgba(255,255,255,0.12); margin-top:14px; }
+    #loading .fill  { height:1px; background:rgba(255,255,255,0.6); width:0%; transition:width .25s; }
+    #ui { position:fixed; top:0; left:0; right:0; bottom:0; pointer-events:none; display:flex; flex-direction:column; }
+    #top { display:flex; justify-content:space-between; padding:14px; align-items:flex-start; }
+    #title { color:rgba(255,255,255,0.9); font:17px/1 Georgia,serif; letter-spacing:5px; background:rgba(0,0,0,0.3); padding:8px 22px; border-radius:7px; backdrop-filter:blur(8px); }
+    #stats { color:rgba(255,255,255,0.75); font:10px/2 'Courier New',monospace; background:rgba(0,0,0,0.35); padding:7px 12px; border-radius:7px; backdrop-filter:blur(6px); text-align:right; }
+    #bot { display:flex; justify-content:center; align-items:flex-end; gap:12px; padding:14px; margin-top:auto; }
+    #time { color:rgba(255,255,255,0.78); font:12px/1 'Courier New',monospace; background:rgba(0,0,0,0.3); padding:5px 14px; border-radius:6px; backdrop-filter:blur(6px); }
+    #hint { color:rgba(255,255,255,0.28); font:11px/1 Georgia,serif; letter-spacing:1px; align-self:center; }
+  </style>
+</head>
+<body>
+  <div id="loading">
+    <div>ISLAND</div>
+    <div class="sub" id="lstatus">initialising…</div>
+    <div class="track"><div class="fill" id="lfill"></div></div>
+  </div>
+  <canvas id="c"></canvas>
+  <div id="ui">
+    <div id="top"><div id="title">ISLAND</div><div id="stats"></div></div>
+    <div id="bot"><div id="time">08:00</div><div id="hint">drag · scroll · explore</div></div>
+  </div>
+
+<script type="importmap">
+{ "imports": {
+  "three":"https://cdn.jsdelivr.net/npm/three@0.162/build/three.module.js",
+  "three/addons/":"https://cdn.jsdelivr.net/npm/three@0.162/examples/jsm/"
+} }
+</script>
+<script type="module">
+import * as THREE from 'three';
+import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+
+// ─── Scale constants ────────────────────────────────────────────────────────
+// VS: each voxel renders at 0.5 world units
+// S:  feature scale multiplier (S=4 → 4 voxels per 1 "logical" unit)
+//     Net effect: same apparent world size, 4× voxel resolution vs S=1.
+const VS = 0.5;
+const S  = 4;
+
+// World grid. At S=4 the island radius is ~S*122=488 voxels, so we need
+// at least 2*488+padding = ~1024 wide — but that's 1GB. Instead we keep
+// the same APPARENT island size by halving the logical radius to ~S*62=248,
+// giving a comfortable 640×640 footprint. H=160 for the mountain.
+const W=640, H=160, D=640;
+const SEA = S * 9;          // = 36
+const CX = W>>1, CZ = D>>1; // 320, 320
+
+// ─── Seeded RNG ─────────────────────────────────────────────────────────────
+let _s=0xc0a51a7d;
+const rnd=()=>{_s^=_s<<13;_s^=_s>>17;_s^=_s<<5;return(_s>>>0)/0x100000000;};
+const rF=(a,b)=>a+rnd()*(b-a);
+const rI=n=>Math.floor(rnd()*n);
+const pick=a=>a[rI(a.length)];
+
+// ─── Perlin value noise ──────────────────────────────────────────────────────
+const _P=new Uint8Array(512);
+(()=>{const p=new Uint8Array(256);for(let i=0;i<256;i++)p[i]=i;let s=0xf1234;for(let i=255;i>0;i--){s=(s^s<<13)>>>0;s=(s^s>>7)>>>0;s=(s^s<<17)>>>0;const j=s%(i+1);[p[i],p[j]]=[p[j],p[i]];}for(let i=0;i<256;i++)_P[i]=_P[i+256]=p[i];})();
+const _f=t=>t*t*t*(t*(t*6-15)+10);
+const vn=(x,z)=>{const X=Math.floor(x)&255,Z=Math.floor(z)&255,fx=x-Math.floor(x),fz=z-Math.floor(z),u=_f(fx),v=_f(fz),a=_P[X]+Z,b=_P[X+1]+Z;return((_P[a]&255)/255*(1-u)*(1-v)+(_P[b]&255)/255*u*(1-v)+(_P[a+1]&255)/255*(1-u)*v+(_P[b+1]&255)/255*u*v)*2-1;};
+const fbm=(x,z,o=5)=>{let v=0,a=.5,f=1,m=0;for(let i=0;i<o;i++){v+=vn(x*f,z*f)*a;m+=a;a*=.5;f*=1.97;}return v/m;};
+
+// ─── Per-voxel colour variation ──────────────────────────────────────────────
+const cHash=(x,y,z)=>{let h=(x*1619^y*31337^z*6971^x*4421^z*2111)&0x7fffffff;h=(h^h>>13)*0x45d9f3b;h=(h^h>>15)&0x7fffffff;return h/0x7fffffff*2-1;};
+
+// ─── Voxel types ─────────────────────────────────────────────────────────────
+const V={
+  AIR:0,
+  DEEP_WATER:1,WATER:2,WATER_SHALLOW:3,
+  SAND:4,SAND_WET:5,PEBBLE:6,
+  GRASS:7,GRASS_DARK:8,GRASS_HIGH:9,
+  STONE:10,STONE_DARK:11,ROCK:12,
+  DIRT:13,SNOW:14,MOSS:15,
+  WOOD:16,PLANK:17,
+  WHITE_WALL:18,CREAM_WALL:19,YELLOW_WALL:20,ORANGE_WALL:21,
+  PURPLE_WALL:22,TEAL_WALL:23,GREY_WALL:24,BRICK:25,COBBLE:26,
+  RED_ROOF:27,DARK_ROOF:28,BROWN_ROOF:29,GREY_ROOF:30,
+  DOOR:31,WINDOW:32,SOLAR:33,SOLAR_FRAME:34,
+  LEAF:35,LEAF_DARK:36,LEAF_AUTUMN:37,PINE:38,PALM_LEAF:39,
+  FARM_SOIL:40,CROP_GREEN:41,CROP_GOLD:42,
+  PATH:43,COBBLE_PATH:44,
+  DOCK_WOOD:45,CHIMNEY:46,
+  FLOWER_R:47,FLOWER_Y:48,FLOWER_P:49,FLOWER_W:50,
+  WINDMILL:51,METAL:52,FENCE:53,MUSHROOM:54,REED:55,
+  LANTERN:56,STAINED_GLASS:57,THATCH:58,
+  WALL_DARK:59, SHUTTER:60, SILL:61,
+};
+const VC=[
+  0x000000, 0x16496a,0x2e8db5,0x4ebccc,
+  0xe8d5a3,0xc4b47c,0x9a8878,
+  0x6ab04c,0x4a8a30,0x8fb84a,
+  0x8a949c,0x5a6068,0x6e7880,
+  0x8b6f47,0xeef2f8,0x3d6b42,
+  0x7a4e18,0xc8a050,
+  0xf0ece4,0xfde8c9,0xffeaa7,0xe17055,
+  0xa29bfe,0x2d9e8f,0xb2bec3,0xb06040,0x888070,
+  0xd63031,0x4a2a10,0x8b4a18,0x909898,
+  0x4a2c20,0xa8d4f8,0x2d3436,0x636e72,
+  0x2eb84a,0x1a7832,0xd4880a,0x2a6028,0x30c060,
+  0x3c1e00,0x50b878,0xd4b822,
+  0xb89e5c,0x787068,
+  0x6a4810,0x808888,
+  0xe74c3c,0xf1c40f,0x9b59b6,0xffffff,
+  0xf0f0f0,0x95a5a6,0x9e8a6e,0xe8400a,0x5a8a40,
+  0xf8c040,0x88c8f8,0xd0a818,
+  0x6a5040, 0x3a2820, 0xd8c898,
+];
+
+// ─── World storage ───────────────────────────────────────────────────────────
+const voxels   = new Uint8Array(W*H*D);
+const surfaceY = new Int16Array(W*D);
+const get=(x,y,z)=>{if(x<0||x>=W||y<0||y>=H||z<0||z>=D)return V.AIR;return voxels[x+z*W+y*W*D];};
+const set=(x,y,z,t)=>{if(x<0||x>=W||y<0||y>=H||z<0||z>=D)return;voxels[x+z*W+y*W*D]=t;};
+const isSolid=(x,y,z)=>get(x,y,z)>V.WATER_SHALLOW;
+const sY=(wx,wz)=>{const x=Math.max(0,Math.min(W-1,Math.round(CX+wx))),z=Math.max(0,Math.min(D-1,Math.round(CZ+wz)));return surfaceY[x+z*W];};
+const TERRAIN=new Set([V.GRASS,V.GRASS_DARK,V.GRASS_HIGH,V.SAND,V.SAND_WET,V.STONE,V.STONE_DARK,V.DIRT,V.MOSS,V.PEBBLE,V.SNOW]);
+const isTransp=t=>t===V.AIR||t===V.WATER||t===V.DEEP_WATER||t===V.WATER_SHALLOW||t===V.FLOWER_R||t===V.FLOWER_Y||t===V.FLOWER_P||t===V.FLOWER_W||t===V.MUSHROOM||t===V.REED||t===V.LANTERN;
+const isGlass=t=>t===V.WINDOW||t===V.STAINED_GLASS;
+
+// ─── Island height (scaled by S) ─────────────────────────────────────────────
+// Philosophy: mostly flat and walkable. One dramatic mountain (NW).
+// Everything else ≤ S*4 above sea — gentle rolling meadows.
+function islandH(wx,wz){
+  const d=Math.sqrt(wx*wx+wz*wz), a=Math.atan2(wz,wx);
+  // Organic coastline — radius in voxels
+  const baseR = S*62;
+  const r = baseR
+    + S*14*Math.sin(a*3+.22) + S*8*Math.sin(a*7+1.38)
+    + S*4*Math.sin(a*11-.82) + S*2*Math.sin(a*17+2.1)
+    +   S*Math.sin(a*23-1.4);
+  const ef = Math.max(0, 1-d/r);
+  if(ef<=0) return 0;
+  const fade = Math.min(1, ef*5);
+  const fs = 1/S;
+
+  // ── Flat base: very gentle undulation (max S*3 above sea) ──────────────
+  let h = S*1.5 * fade;
+  h += fbm(wx*fs*.08+1.1, wz*fs*.08+3.3, 4) * S*2.5 * fade;
+  h += fbm(wx*fs*.2+5,    wz*fs*.2+2,    3) * S*1.0 * fade;
+  // Keep it from going below sea at all on the inhabited half
+  h = Math.max(h, fade > 0.3 ? S*1 * Math.min(1, (fade-0.3)*3) : 0);
+
+  // ── Single mountain (NW, at ~(-42, -55) logical) ────────────────────────
+  const mwx = -S*42, mwz = -S*55;
+  const md = Math.sqrt((wx-mwx)**2 + (wz-mwz)**2);
+  const mR = S*38; // radius of mountain base
+  if(md < mR){
+    const mf = Math.max(0, 1 - md/mR);
+    // Sharp cone with some fbm roughness for realism
+    const mHeight = S*55;
+    const cone = mHeight * mf**1.3;
+    const rough = fbm(wx*fs*.28+8.4, wz*fs*.28+2.6, 4) * S*6 * mf;
+    h += cone + rough;
+  }
+
+  // ── Dock spit (S) stays low ─────────────────────────────────────────────
+  const dd = Math.sqrt(wx*wx+(wz-S*62)**2);
+  if(dd < S*12) h = Math.max(h * (dd/(S*12)), S*1.5*Math.max(0,1-dd/(S*12)));
+
+  // ── Town area gently flattened ───────────────────────────────────────────
+  const td = Math.sqrt(wx*wx+wz*wz);
+  if(td < S*22) h = h*(td/(S*22)) + S*2*(1-td/(S*22));
+
+  return Math.max(0, h);
+}
+
+// ─── Terrain generation ──────────────────────────────────────────────────────
+function generateTerrain(){
+  for(let z=0;z<D;z++)for(let x=0;x<W;x++){
+    const wx=x-CX,wz=z-CZ,h=islandH(wx,wz),ty=Math.floor(SEA+h);
+    surfaceY[x+z*W]=ty;
+    for(let y=0;y<SEA-3;y++)set(x,y,z,V.DEEP_WATER);
+    if(h<=0){set(x,SEA-2,z,V.DEEP_WATER);set(x,SEA-1,z,V.WATER);set(x,SEA,z,V.WATER);}
+    else if(h<1){set(x,SEA-2,z,V.DEEP_WATER);set(x,SEA-1,z,V.WATER_SHALLOW);set(x,SEA,z,V.SAND_WET);surfaceY[x+z*W]=SEA;}
+    else{
+      const beach=h<S*2.4,pebble=h>=S*2.4&&h<S*3.2,high=h>S*40,peak=h>S*52;
+      for(let y=SEA-1;y<=ty;y++){
+        if(y<SEA){set(x,y,z,V.DEEP_WATER);continue;}
+        let t;const fs=1/S;
+        if(y===ty){if(peak)t=V.SNOW;else if(high)t=V.STONE;else if(beach)t=V.SAND;else if(pebble)t=V.PEBBLE;else t=(fbm(wx*fs*.38+10,wz*fs*.38+10,2)>.18)?V.GRASS_DARK:V.GRASS;}
+        else if(y>=ty-S*3){t=(beach||pebble)?V.SAND:(peak?V.SNOW:V.DIRT);}
+        else t=V.STONE;
+        set(x,y,z,t);
+      }
+      if(!peak&&!beach&&h>S*40&&h<=S*52)set(x,ty,z,V.GRASS_HIGH);
+    }
+  }
+  // Cliff erosion
+  for(let z=1;z<D-1;z++)for(let x=1;x<W-1;x++){
+    const ty=surfaceY[x+z*W];
+    for(const[dx,dz]of[[1,0],[-1,0],[0,1],[0,-1]]){
+      const nty=surfaceY[(x+dx)+(z+dz)*W],drop=ty-nty;
+      if(drop>=S*5)for(let y=nty+1;y<ty;y++){const c=get(x,y,z);if(c===V.DIRT||c===V.GRASS||c===V.GRASS_DARK||c===V.GRASS_HIGH)set(x,y,z,drop>=S*10?V.STONE_DARK:V.STONE);}
+    }
+  }
+}
+
+// ─── Stream ──────────────────────────────────────────────────────────────────
+function carveStream(){
+  const pts=[[-48,-78],[-38,-60],[-26,-44],[-14,-26],[-4,-10],[8,4],[18,18],[28,34],[32,50],[32,68],[28,90]];
+  for(let i=0;i<pts.length-1;i++){
+    const[x1,z1]=pts[i],[x2,z2]=pts[i+1];
+    const steps=Math.ceil(Math.hypot((x2-x1)*S,(z2-z1)*S)*3);
+    for(let s=0;s<=steps;s++){
+      const t=s/steps,wx=(x1+(x2-x1)*t)*S,wz=(z1+(z2-z1)*t)*S;
+      const bx=Math.round(CX+wx),bz=Math.round(CZ+wz),by=sY(wx,wz);
+      if(by<SEA)continue;
+      for(let dx=-S;dx<=S;dx++)for(let dz=-S;dz<=S;dz++){
+        if(Math.abs(dx)+Math.abs(dz)<=S){set(bx+dx,by,bz+dz,V.WATER);set(bx+dx,by-1,bz+dz,V.STONE);}
+        else{const bt=get(bx+dx,by,bz+dz);if(bt===V.GRASS||bt===V.GRASS_DARK||bt===V.DIRT)set(bx+dx,by,bz+dz,V.MOSS);}
+      }
+    }
+  }
+}
+
+// ─── Building helpers ─────────────────────────────────────────────────────────
+// All wx,wz are in the original (pre-scale) coordinate space; multiply by S inside.
+
+const pave=(wx,wz,w,d,t=V.PATH)=>{
+  const bx=Math.round(CX+wx*S),bz=Math.round(CZ+wz*S);
+  for(let dx=0;dx<w*S;dx++)for(let dz=0;dz<d*S;dz++){const by=sY(wx*S+dx,wz*S+dz);set(bx+dx,by,bz+dz,t);}
+};
+
+// house() — all params are pre-scale; internally multiplied by S.
+// Now with: 2-voxel-thick walls, window sills, shutters, brick courses on BRICK walls
+function house(wx,wz,wall,roof,{w=7,d=6,ht=5,solar=false,twoStory=false}={}){
+  const sw=w*S,sd=d*S,sht=ht*S;
+  const bx=Math.round(CX+wx*S),bz=Math.round(CZ+wz*S);
+  const by=sY(wx*S+sw*.5,wz*S+sd*.5);
+  pave(wx-1,wz-1,w+2,d+2);
+
+  const top=twoStory?sht*2:sht;
+
+  // Walls — 2 voxels thick (inner face is AIR or floor)
+  for(let dy=1;dy<=top;dy++){
+    for(let dx=0;dx<sw;dx++)for(let dz=0;dz<sd;dz++){
+      if(twoStory&&dy===sht+1){set(bx+dx,by+dy,bz+dz,V.PLANK);continue;}
+      const xEdge=dx<2||dx>=sw-2,zEdge=dz<2||dz>=sd-2;
+      const edge=xEdge||zEdge;
+      if(edge){
+        // Brick courses: alternate slightly darker row every 2 voxels
+        const brickT=(wall===V.BRICK&&dy%2===0)?V.WALL_DARK:wall;
+        set(bx+dx,by+dy,bz+dz,brickT);
+      } else set(bx+dx,by+dy,bz+dz,V.AIR);
+    }
+  }
+  // Two-storey overhang (front cantilever)
+  if(twoStory)for(let dy=sht+1;dy<=top;dy++)for(let dx=0;dx<sw;dx++)set(bx+dx,by+dy,bz-1,wall);
+
+  // Pitched roof with overhang on all sides
+  const rh=Math.ceil(sw/2);
+  for(let ry=0;ry<rh;ry++){
+    for(let dx=ry;dx<sw-ry;dx++){
+      for(let dz=-2;dz<=sd+1;dz++)set(bx+dx,by+top+1+ry,bz+dz,roof);
+    }
+  }
+  // Roof underside (soffit — one layer of planks under eaves)
+  for(let dx=-1;dx<=sw;dx++)for(let dz=-2;dz<=sd+1;dz++)set(bx+dx,by+top,bz+dz,V.PLANK);
+
+  // Door — 2 wide, 4 tall with small stone arch above
+  const mid=Math.floor(sw/2)-1;
+  for(let dy=1;dy<=4;dy++)for(let ddx=0;ddx<2;ddx++)set(bx+mid+ddx,by+dy,bz,V.DOOR);
+  // Stone lintel over door
+  for(let ddx=-1;ddx<=2;ddx++)set(bx+mid+ddx,by+5,bz,V.STONE);
+
+  // Lantern on door post
+  set(bx+mid+2,by+4,bz,V.LANTERN);
+
+  // Windows: 2 wide × 3 tall with stone sills
+  const floors=twoStory?2:1;
+  for(let fl=0;fl<floors;fl++){
+    const wy=by+fl*sht+3;
+    // Front and back windows
+    const winPositions=[];
+    if(sw>=10){winPositions.push([2,0],[sw-4,0],[2,sd-2],[sw-4,sd-2]);}
+    if(sd>=8) {winPositions.push([0,Math.floor(sd/2)-1],[sw-2,Math.floor(sd/2)-1]);}
+    for(const[wx2,wz2]of winPositions){
+      for(let wy2=0;wy2<3;wy2++)for(let wx3=0;wx3<2;wx3++)set(bx+wx2,wy+wy2,bz+wz2,V.WINDOW);
+      // Sill
+      for(let wx3=-1;wx3<=2;wx3++)set(bx+wx2+wx3,wy-1,bz+wz2,V.SILL);
+      // Shutters (dark, flanking window)
+      if(wz2===0||wz2===sd-2){set(bx+wx2-1,wy,bz+wz2,V.SHUTTER);set(bx+wx2-1,wy+1,bz+wz2,V.SHUTTER);set(bx+wx2+2,wy,bz+wz2,V.SHUTTER);set(bx+wx2+2,wy+1,bz+wz2,V.SHUTTER);}
+    }
+  }
+
+  // Chimney — 2×2 with offset cap
+  const chX=bx+sw-3,chZ=bz+sd-3,chY=by+top+1;
+  for(let dy=0;dy<4;dy++)for(let dx=0;dx<2;dx++)for(let dz=0;dz<2;dz++)set(chX+dx,chY+dy,chZ+dz,V.CHIMNEY);
+  // Chimney cap (slightly wider)
+  for(let dx=-1;dx<=2;dx++)for(let dz=-1;dz<=2;dz++)set(chX+dx,chY+3,chZ+dz,V.STONE_DARK);
+
+  // Solar panels
+  if(solar){
+    const sy=by+top+2;
+    for(let dx=2;dx<sw-4;dx++)for(let dz2=2;dz2<S*2+2;dz2++)set(bx+dx,sy,bz+dz2,(dx%S===0)?V.SOLAR_FRAME:V.SOLAR);
+  }
+}
+
+// Church with proper pointed spire
+function church(wx,wz){
+  const bx=Math.round(CX+wx*S),bz=Math.round(CZ+wz*S),by=sY(wx*S+10,wz*S+14);
+  pave(wx-4,wz-4,14+4,12+4);
+  const nw=S*10,nd=S*8,nht=S*7;
+  for(let dy=1;dy<=nht;dy++)for(let dx=0;dx<nw;dx++)for(let dz=0;dz<nd;dz++){
+    const e=dx<2||dx>=nw-2||dz<2||dz>=nd-2;set(bx+dx,by+dy,bz+dz,e?V.WHITE_WALL:V.AIR);
+  }
+  // Stained glass: 2×4 panels
+  for(let dy=3;dy<=7;dy++){
+    set(bx,by+dy,bz+4,V.STAINED_GLASS);set(bx,by+dy,bz+5,V.STAINED_GLASS);set(bx,by+dy,bz+10,V.STAINED_GLASS);set(bx,by+dy,bz+11,V.STAINED_GLASS);
+    set(bx+nw-1,by+dy,bz+4,V.STAINED_GLASS);set(bx+nw-1,by+dy,bz+5,V.STAINED_GLASS);set(bx+nw-1,by+dy,bz+10,V.STAINED_GLASS);set(bx+nw-1,by+dy,bz+11,V.STAINED_GLASS);
+  }
+  // Arched rose window front
+  for(let dy=5;dy<=8;dy++){set(bx+nw/2-2,by+dy,bz,V.STAINED_GLASS);set(bx+nw/2-1,by+dy,bz,V.STAINED_GLASS);set(bx+nw/2,by+dy,bz,V.STAINED_GLASS);set(bx+nw/2+1,by+dy,bz,V.STAINED_GLASS);}
+  // Entrance doors (2 arched doors)
+  for(let dy=1;dy<=5;dy++){set(bx+nw/2-3,by+dy,bz,V.DOOR);set(bx+nw/2-2,by+dy,bz,V.DOOR);set(bx+nw/2+1,by+dy,bz,V.DOOR);set(bx+nw/2+2,by+dy,bz,V.DOOR);}
+  set(bx+nw/2-3,by+6,bz,V.STONE);set(bx+nw/2-2,by+6,bz,V.STONE);set(bx+nw/2+1,by+6,bz,V.STONE);set(bx+nw/2+2,by+6,bz,V.STONE);
+  // Nave roof
+  const rh=Math.ceil(nw/2);for(let ry=0;ry<rh;ry++)for(let dx=ry;dx<nw-ry;dx++)for(let dz=-2;dz<=nd+1;dz++)set(bx+dx,by+nht+1+ry,bz+dz,V.GREY_ROOF);
+  // Bell tower
+  const tw=S*4,td=S*4,tht=S*16;
+  for(let dy=1;dy<=tht;dy++)for(let dx=0;dx<tw;dx++)for(let dz=0;dz<td;dz++){const e=dx<1||dx>=tw-1||dz<1||dz>=td-1;set(bx+dx,by+dy,bz+nd+4+dz,e?V.WHITE_WALL:V.AIR);}
+  // Bell arch windows (4 sides)
+  for(let dy=tht-6;dy<=tht-2;dy++){set(bx+tw/2-1,by+dy,bz+nd+4,V.WINDOW);set(bx+tw/2,by+dy,bz+nd+4,V.WINDOW);set(bx,by+dy,bz+nd+4+td/2-1,V.WINDOW);set(bx,by+dy,bz+nd+4+td/2,V.WINDOW);}
+  // Spire
+  const sx=bx+tw/2,sz=bz+nd+4+td/2;
+  for(let dy=0;dy<tht/2;dy++){const r=Math.max(0,Math.floor(tht/4-dy*.7));for(let dx=-r;dx<=r;dx++)for(let dz=-r;dz<=r;dz++)if(Math.abs(dx)+Math.abs(dz)<=r)set(sx+dx,by+tht+dy,sz+dz,dy<S?V.GREY_ROOF:V.STONE_DARK);}
+}
+
+// Barn
+function barn(wx,wz){
+  const bx=Math.round(CX+wx*S),bz=Math.round(CZ+wz*S),by=sY(wx*S+12,wz*S+10);
+  const bw=S*12,bd=S*9,bht=S*7;
+  pave(wx-2,wz-2,14,11);
+  for(let dy=1;dy<=bht;dy++)for(let dx=0;dx<bw;dx++)for(let dz=0;dz<bd;dz++){const e=dx<2||dx>=bw-2||dz<2||dz>=bd-2;set(bx+dx,by+dy,bz+dz,e?V.YELLOW_WALL:V.AIR);}
+  for(let ry=0;ry<S*3;ry++)for(let dx=ry;dx<bw-ry;dx++)for(let dz=-2;dz<=bd+1;dz++)set(bx+dx,by+bht+1+ry,bz+dz,V.BROWN_ROOF);
+  for(let ry=0;ry<S*5;ry++)for(let dx=ry+S*3;dx<bw-ry-S*3;dx++)for(let dz=-2;dz<=bd+1;dz++)set(bx+dx,by+bht+S*3+1+ry,bz+dz,V.DARK_ROOF);
+  // Big double barn doors
+  for(let dy=1;dy<=S*5;dy++)for(let ddx=0;ddx<S*3;ddx++){set(bx+S*3+ddx,by+dy,bz,V.DOOR);set(bx+bw-S*3-1-ddx+S,by+dy,bz,V.DOOR);}
+  // Solar
+  for(let dx=S*2;dx<bw-S*2;dx++)for(let dz=S*2;dz<S*6;dz++)set(bx+dx,by+bht+2,bz+dz,dx%S===0?V.SOLAR_FRAME:V.SOLAR);
+}
+
+// Treehouse
+function treehouse(wx,wz){
+  const bx=Math.round(CX+wx*S),bz=Math.round(CZ+wz*S),by=sY(wx*S,wz*S);
+  const ht=S*16;
+  for(const[dx,dz]of[[0,0],[S*5,0],[0,S*5],[S*5,S*5]])for(let dy=1;dy<=ht;dy++)set(bx+dx,by+dy,bz+dz,V.WOOD);
+  for(let dx=-S;dx<=S*6;dx++)for(let dz=-S;dz<=S*6;dz++)set(bx+dx,by+ht,bz+dz,V.PLANK);
+  const cw=S*5,cd=S*5,cht=S*5;
+  for(let dy=1;dy<=cht;dy++)for(let dx=0;dx<cw;dx++)for(let dz=0;dz<cd;dz++){const e=dx<1||dx>=cw-1||dz<1||dz>=cd-1;set(bx+dx,by+ht+dy,bz+dz,e?V.BROWN_ROOF:V.AIR);}
+  set(bx+cw/2,by+ht+1,bz,V.DOOR);set(bx+cw/2,by+ht+2,bz,V.DOOR);
+  set(bx+1,by+ht+3,bz+cd-1,V.WINDOW);set(bx+1,by+ht+3,bz+cd-1,V.WINDOW);
+  for(let ry=0;ry<S*3;ry++)for(let dx=ry;dx<cw-ry;dx++)for(let dz=-1;dz<=cd;dz++)set(bx+dx,by+ht+cht+1+ry,bz+dz,V.DARK_ROOF);
+  for(let dy=0;dy<ht;dy+=S)set(bx+cw/2,by+dy,bz-1,V.PLANK);
+}
+
+// Aquarium
+function aquarium(wx,wz){
+  const bx=Math.round(CX+wx*S),bz=Math.round(CZ+wz*S),by=sY(wx*S+14,wz*S+12);
+  const aw=S*14,ad=S*11,aht=S*8;
+  pave(wx-2,wz-2,aw/S+4,ad/S+4);
+  for(let dy=1;dy<=aht;dy++)for(let dx=0;dx<aw;dx++)for(let dz=0;dz<ad;dz++){
+    const e=dx<2||dx>=aw-2||dz<2||dz>=ad-2;
+    if(!e){set(bx+dx,by+dy,bz+dz,dy<=aht-2?V.WATER:V.AIR);continue;}
+    const corner=(dx<2||dx>=aw-2)&&(dz<2||dz>=ad-2);
+    set(bx+dx,by+dy,bz+dz,corner?V.STONE:(dy>=S*2&&dy<=aht-2)?V.WINDOW:V.TEAL_WALL);
+  }
+  for(let ry=0;ry<S*7;ry++)for(let dx=ry;dx<aw-ry;dx++)for(let dz=-2;dz<=ad+1;dz++)set(bx+dx,by+aht+1+ry,bz+dz,V.TEAL_WALL);
+  for(let dy=1;dy<=S*3;dy++)for(let ddx=0;ddx<S*2;ddx++){set(bx+aw/2-S+ddx,by+dy,bz,V.DOOR);}
+  for(let i=aw/2-S*3;i<=aw/2+S*3;i++)set(bx+i,by+aht+1,bz,V.STAINED_GLASS);
+}
+
+// Market stall
+function stall(wx,wz,fab){
+  const bx=Math.round(CX+wx*S),bz=Math.round(CZ+wz*S),by=sY(wx*S+S,wz*S+S);
+  for(let dy=1;dy<=S*4;dy++){set(bx,by+dy,bz,V.WOOD);set(bx+S*4-1,by+dy,bz,V.WOOD);}
+  for(let dx=0;dx<S*4;dx++)for(let dz=0;dz<S*2;dz++)set(bx+dx,by+S*2,bz+dz,V.PLANK);
+  for(let dx=0;dx<S*4;dx++){set(bx+dx,by+S*5,bz,fab);set(bx+dx,by+S*5,bz-1,fab);set(bx+dx,by+S*5,bz-2,fab);set(bx+dx,by+S*4,bz+1,fab);}
+}
+
+// Trees
+function treeOak(wx,wz,ht=9){
+  const bx=Math.round(CX+wx*S),bz=Math.round(CZ+wz*S),by=sY(wx*S,wz*S);
+  const lf=rnd()<.25?V.LEAF_DARK:rnd()<.12?V.LEAF_AUTUMN:V.LEAF;
+  const sh=ht*S;
+  for(let dy=1;dy<sh-S*2;dy++){set(bx,by+dy,bz,V.WOOD);if(S>1&&dy>1){set(bx+1,by+dy,bz,V.WOOD);}} // 2-wide trunk when S=2
+  for(let ly=0;ly<S*5;ly++){const r=Math.max(0,S*3-Math.floor(ly*.9));for(let dx=-r;dx<=r;dx++)for(let dz=-r;dz<=r;dz++)if(dx*dx+dz*dz<=r*r+S)set(bx+dx,by+sh-S*3+ly,bz+dz,lf);}
+}
+function treePine(wx,wz,ht=13){
+  const bx=Math.round(CX+wx*S),bz=Math.round(CZ+wz*S),by=sY(wx*S,wz*S);
+  const sh=ht*S;
+  for(let dy=1;dy<=sh;dy++){set(bx,by+dy,bz,V.WOOD);if(S>1)set(bx+1,by+dy,bz,V.WOOD);}
+  for(let ly=0;ly<sh-S*2;ly++){const r=Math.max(0,Math.floor((sh-ly-S*2)*.5)-1);for(let dx=-r;dx<=r;dx++)for(let dz=-r;dz<=r;dz++)if(Math.abs(dx)+Math.abs(dz)<=r+1)set(bx+dx,by+S*2+ly,bz+dz,V.PINE);}
+}
+function treePalm(wx,wz){
+  const bx=Math.round(CX+wx*S),bz=Math.round(CZ+wz*S),by=sY(wx*S,wz*S);
+  const ln=rI(3)-1,lnz=rI(3)-1,sh=S*9;
+  for(let dy=1;dy<=sh;dy++){set(bx+Math.round(ln*dy/sh),by+dy,bz+Math.round(lnz*dy/sh),V.WOOD);if(S>1)set(bx+Math.round(ln*dy/sh)+1,by+dy,bz+Math.round(lnz*dy/sh),V.WOOD);}
+  const tx=bx+ln,ty=by+sh,tz=bz+lnz;
+  for(const[dx,dz]of[[-S*3,0],[S*3,0],[0,-S*3],[0,S*3],[-S*2,-S*2],[S*2,-S*2],[-S*2,S*2],[S*2,S*2]])
+    for(let i=0;i<3;i++)set(tx+Math.round(dx*(i+1)/3),ty+1-Math.floor(i/2),tz+Math.round(dz*(i+1)/3),V.PALM_LEAF);
+  set(tx,ty,tz,V.PALM_LEAF);
+}
+function sWall(wx1,wz1,wx2,wz2,t=V.STONE){
+  const steps=Math.ceil(Math.hypot((wx2-wx1)*S,(wz2-wz1)*S)*1.4);
+  for(let i=0;i<=steps;i++){const r=i/steps,wx=wx1+(wx2-wx1)*r,wz=wz1+(wz2-wz1)*r;const bx=Math.round(CX+wx*S),bz=Math.round(CZ+wz*S),by=sY(wx*S,wz*S);for(let dx=0;dx<S;dx++)for(let dz=0;dz<S;dz++){set(bx+dx,by+1,bz+dz,t);set(bx+dx,by+2,bz+dz,t);}}
+}
+function path(wx1,wz1,wx2,wz2,w=2,t=V.PATH){
+  const steps=Math.ceil(Math.hypot((wx2-wx1)*S,(wz2-wz1)*S)*2.5);
+  for(let i=0;i<=steps;i++){const r=i/steps,wx=wx1+(wx2-wx1)*r,wz=wz1+(wz2-wz1)*r;for(let dw=0;dw<w*S;dw++){const bx=Math.round(CX+wx*S+dw),bz=Math.round(CZ+wz*S),by=sY(wx*S+dw,wz*S);set(bx,by,bz,t);}}
+}
+function boulders(wx,wz,n=4){
+  for(let i=0;i<n;i++){const ox=rF(-S*3,S*3),oz=rF(-S*3,S*3),bx=Math.round(CX+wx*S+ox),bz=Math.round(CZ+wz*S+oz),by=sY(wx*S+ox,wz*S+oz),s=rI(S*2)+S;for(let dx=-s;dx<=s;dx++)for(let dy=0;dy<=s;dy++)for(let dz=-s;dz<=s;dz++)if(dx*dx+dy*dy*2+dz*dz<=s*s+S)set(bx+dx,by+dy,bz+dz,V.ROCK);}
+}
+
+// ─── Place Features ───────────────────────────────────────────────────────────
+function placeFeatures(){
+  // Town square
+  for(let dx=-S*14;dx<=S*14;dx++)for(let dz=-S*14;dz<=S*14;dz++){const d=Math.abs(dx)+Math.abs(dz);if(d<=S*8||(Math.abs(dx)<=S*2&&Math.abs(dz)<=S*12)||(Math.abs(dx)<=S*12&&Math.abs(dz)<=S*2))fill2(dx-1,dz-1,0,1,1,1,d<=S*5?V.COBBLE_PATH:V.PATH);}
+  {const by=sY(0,0);for(let dx=-S*2;dx<=S*2+S-1;dx++)for(let dz=-S*2;dz<=S*2+S-1;dz++){const e=Math.abs(dx)>=S*2||Math.abs(dz)>=S*2;set(CX+dx,by+1,CZ+dz,e?V.STONE:V.WATER);if(e)set(CX+dx,by+2,CZ+dz,V.STONE);}
+  set(CX,by+3,CZ,V.STONE);set(CX+1,by+3,CZ,V.STONE);
+  for(const[dx,dz]of[[-S*3,-S*3],[S*3,-S*3],[-S*3,S*3],[S*3,S*3]])set(CX+dx,by+1,CZ+dz,V.LANTERN);}
+
+  church(-30,-26);
+  house(-24,-19,V.YELLOW_WALL,V.RED_ROOF,{w:7,d:5,ht:4});
+  house(9,-19,V.WHITE_WALL,V.RED_ROOF,{w:7,d:5,ht:4});
+  house(-24,-33,V.CREAM_WALL,V.DARK_ROOF,{w:8,d:6,ht:4});
+  house(8,-33,V.YELLOW_WALL,V.DARK_ROOF,{w:7,d:5,ht:4});
+  house(-6,-37,V.WHITE_WALL,V.RED_ROOF,{w:6,d:5,ht:4});
+  house(-20,-42,V.CREAM_WALL,V.RED_ROOF,{w:7,d:5,ht:4,solar:true});
+  house(12,-42,V.YELLOW_WALL,V.BROWN_ROOF,{w:8,d:5,ht:4});
+  house(-38,-48,V.BRICK,V.DARK_ROOF,{w:9,d:6,ht:5,twoStory:true});
+  house(22,-48,V.WHITE_WALL,V.GREY_ROOF,{w:9,d:6,ht:4,solar:true});
+  house(-30,-17,V.ORANGE_WALL,V.BROWN_ROOF,{w:10,d:8,ht:5,solar:true});
+  house(24,-17,V.WHITE_WALL,V.RED_ROOF,{w:9,d:7,ht:5});
+  house(36,16,V.PURPLE_WALL,V.DARK_ROOF,{w:13,d:10,ht:6,twoStory:true});
+  house(-40,16,V.GREY_WALL,V.DARK_ROOF,{w:12,d:10,ht:5,solar:true});
+  house(-16,-32,V.CREAM_WALL,V.BROWN_ROOF,{w:12,d:9,ht:5,twoStory:true});
+  house(17,-31,V.WHITE_WALL,V.DARK_ROOF,{w:14,d:10,ht:5});
+  house(-5,-27,V.CREAM_WALL,V.RED_ROOF,{w:10,d:7,ht:4});
+  house(32,22,V.TEAL_WALL,V.TEAL_WALL,{w:9,d:7,ht:4});
+  house(-32,22,V.GREY_WALL,V.RED_ROOF,{w:8,d:7,ht:4});
+  stall(7,-10,V.RED_ROOF);stall(12,-10,V.YELLOW_WALL);stall(-10,-10,V.TEAL_WALL);stall(-15,-10,V.ORANGE_WALL);
+
+  barn(-92,38);
+  house(-76,44,V.CREAM_WALL,V.RED_ROOF,{w:9,d:7,ht:4,solar:true});
+  house(-95,60,V.GREY_WALL,V.BROWN_ROOF,{w:7,d:5,ht:3});
+  for(let fdx=-108;fdx<-68;fdx+=2)for(let fdz=30;fdz<64;fdz+=2){const by=sY(fdx*S,fdz*S);if(by>SEA+1){set(Math.round(CX+fdx*S),by,Math.round(CZ+fdz*S),V.FARM_SOIL);if(rnd()<.7)set(Math.round(CX+fdx*S),by+1,Math.round(CZ+fdz*S),(fdz<46)?V.CROP_GREEN:V.CROP_GOLD);}}
+  sWall(-110,28,-64,28,V.FENCE);sWall(-64,28,-64,66,V.FENCE);sWall(-64,66,-110,66,V.FENCE);sWall(-110,66,-110,28,V.FENCE);
+  sWall(-78,-12,-92,22,V.STONE);sWall(-92,22,-108,46,V.STONE);
+
+  // Windmill
+  {const bx=Math.round(CX-S*62),bz=Math.round(CZ+S*18),by=sY(-S*62,S*18);
+  const wh=S*19;
+  for(let dy=1;dy<=wh;dy++)for(let dx=0;dx<S;dx++)for(let dz=0;dz<S;dz++)set(bx+dx,by+dy,bz+dz,dy<=S*15?V.STONE:V.STONE_DARK);
+  set(bx-1,by+S*16,bz,V.METAL);set(bx+S,by+S*16,bz,V.METAL);
+  for(let i=-S*8;i<=S*8;i++){if(i===0)continue;const t=Math.abs(i)>=S*3&&Math.abs(i)<=S*6;set(bx+i,by+S*16,bz,V.WINDMILL);set(bx,by+S*16+i,bz,V.WINDMILL);if(t){set(bx+i,by+S*16+Math.sign(i)*S,bz,V.WINDMILL);set(bx+Math.sign(i)*S,by+S*16+i,bz,V.WINDMILL);}}
+  set(bx,by+S*16,bz,V.METAL);
+  house(-64,16,V.STONE,V.BROWN_ROOF,{w:6,d:5,ht:4});}
+
+  // Lighthouse
+  {const bx=Math.round(CX+S*18),bz=Math.round(CZ+S*118),by=SEA;
+  for(let dy=1;dy<=S*22;dy++){const r=dy<S*16?S:0;for(let dx=-r;dx<=r+S-1;dx++)for(let dz=-r;dz<=r+S-1;dz++)set(bx+dx,by+dy,bz+dz,dy<S*16?V.WHITE_WALL:dy<S*19?V.RED_ROOF:V.WHITE_WALL);}
+  for(let dx=-S;dx<=S*2;dx++)for(let dz=-S;dz<=S*2;dz++)set(bx+dx,by+S*23,bz+dz,V.WINDOW);
+  for(let dx=0;dx<S;dx++)for(let dz=0;dz<S;dz++){set(bx+dx,by+S*24,bz+dz,V.LANTERN);}
+  for(const[dx,dz]of[[-S,0],[-S,S],[-S,S*2],[S*2+S,0],[S*2+S,S],[S*2+S,S*2],[0,-S],[S,-S],[S*2,-S],[0,S*3],[S,S*3],[S*2,S*3]])set(bx+dx,by+S*23,bz+dz,V.METAL);
+  house(14,114,V.WHITE_WALL,V.RED_ROOF,{w:7,d:5,ht:4});}
+
+  // Dock
+  for(let dz=0;dz<S*28;dz++){for(let dx=-S*2;dx<=S*3;dx++)set(CX+dx,SEA,CZ+S*106+dz,V.DOCK_WOOD);if(dz%S===0){set(CX-S*2,SEA-1,CZ+S*106+dz,V.WOOD);set(CX+S*3,SEA-1,CZ+S*106+dz,V.WOOD);set(CX-S*2,SEA-2,CZ+S*106+dz,V.WOOD);set(CX+S*3,SEA-2,CZ+S*106+dz,V.WOOD);}if(dz>0&&dz<S*27){set(CX-S*2,SEA+1,CZ+S*106+dz,V.METAL);set(CX+S*3,SEA+1,CZ+S*106+dz,V.METAL);}}
+  house(-6,98,V.DOCK_WOOD,V.BROWN_ROOF,{w:8,d:6,ht:3});house(6,98,V.WHITE_WALL,V.RED_ROOF,{w:7,d:5,ht:3});
+
+  // Radio mast
+  {const bx=Math.round(CX+S*50),bz=Math.round(CZ+S*20),by=sY(S*50,S*20);
+  for(let dy=1;dy<=S*24;dy++)set(bx,by+dy,bz,V.METAL);
+  for(let i=1;i<=S*7;i++){set(bx+i,by+S*24-i*2,bz+i,V.METAL);set(bx-i,by+S*24-i*2,bz-i,V.METAL);}
+  house(48,18,V.GREY_WALL,V.DARK_ROOF,{w:7,d:5,ht:3,solar:true});}
+
+  aquarium(62,-26);
+  house(-40,-80,V.WHITE_WALL,V.GREY_ROOF,{w:16,d:12,ht:6,twoStory:true,solar:true});
+  treehouse(72,64);
+
+  sWall(-68,-102,-48,-96,V.STONE_DARK);sWall(-48,-96,-42,-102,V.STONE_DARK);
+  {const by=sY(-S*44,-S*98);set(Math.round(CX-S*44),by+1,Math.round(CZ-S*98),V.STONE);set(Math.round(CX-S*44),by+2,Math.round(CZ-S*98),V.STONE);set(Math.round(CX-S*44),by+3,Math.round(CZ-S*98),V.LANTERN);}
+
+  // Paths
+  path(0,-12,0,-42,3,V.COBBLE_PATH);path(0,12,0,66,3,V.PATH);path(0,66,0,106,2,V.PATH);
+  path(-10,0,-86,36,2,V.PATH);path(10,0,62,26,2,V.PATH);
+  path(0,-42,-30,-26,2,V.PATH);path(-10,-12,-30,-17,2,V.PATH);path(10,-12,24,-17,2,V.PATH);
+  path(-12,8,-40,16,2,V.PATH);path(12,8,36,16,2,V.PATH);
+  path(-8,-24,-16,-32,2,V.PATH);path(8,-24,17,-31,2,V.PATH);
+  path(24,0,62,-26,2,V.PATH);path(-16,0,-40,-80,2,V.PATH);path(-10,0,-62,18,2,V.PATH);
+  path(10,26,50,20,2,V.PATH);path(16,90,18,118,2,V.PATH);path(-22,-12,-50,-92,2,V.PATH);
+
+  for(const[brx,brz]of[[-74,-72],[78,-68],[-90,12],[84,22],[-80,58],[68,90],[-44,-96],[50,-90],[-12,104],[34,-80]])boulders(brx,brz,3+rI(4));
+
+  // Beaches
+  for(let i=0;i<12;i++){const a=-0.5+rF(0,.6),r=96+rF(-8,8),px=Math.cos(a)*r,pz=Math.sin(a)*r;if(sY(px*S,pz*S)<=SEA+S*2)treePalm(px,pz);}
+  for(let i=0;i<35;i++){const rx=22+rF(-8,8),rz=88+rF(-10,10),bx=Math.round(CX+rx*S),bz=Math.round(CZ+rz*S),by=sY(rx*S,rz*S);if(by===SEA||by===SEA+1)set(bx,by+1,bz,V.REED);}
+
+  // Forest NE
+  for(let i=0;i<110;i++){const a=rF(-.6,1.3),r=42+rF(0,82),tx=Math.cos(a)*r,tz=Math.sin(a)*r;if(sY(tx*S,tz*S)>SEA+S*2)(rnd()<.3?treePine(tx,tz,10+rI(6)):treeOak(tx,tz,8+rI(5)));}
+  for(let i=0;i<35;i++){const tx=-46+rF(-28,28),tz=-82+rF(-28,28);if(sY(tx*S,tz*S)>SEA+S*8)treePine(tx,tz,11+rI(6));}
+  for(let i=0;i<80;i++){const a=rnd()*Math.PI*2,r=18+rnd()*90,tx=Math.cos(a)*r,tz=Math.sin(a)*r;if(sY(tx*S,tz*S)>SEA+S*2)treeOak(tx,tz,7+rI(4));}
+
+  // Flowers & mushrooms
+  const flrs=[V.FLOWER_R,V.FLOWER_Y,V.FLOWER_P,V.FLOWER_W];
+  for(let i=0;i<320;i++){const a=rnd()*Math.PI*2,r=6+rnd()*100,fx=Math.cos(a)*r,fz=Math.sin(a)*r,bx=Math.round(CX+fx*S),bz=Math.round(CZ+fz*S),by=sY(fx*S,fz*S),t=get(bx,by,bz);if(by>SEA+1&&(t===V.GRASS||t===V.GRASS_DARK||t===V.GRASS_HIGH||t===V.MOSS))set(bx,by+1,bz,pick(flrs));}
+  for(let i=0;i<60;i++){const a=rF(-.6,1.3),r=38+rnd()*66,fx=Math.cos(a)*r,fz=Math.sin(a)*r,bx=Math.round(CX+fx*S),bz=Math.round(CZ+fz*S),by=sY(fx*S,fz*S);if(by>SEA+1&&get(bx,by,bz)===V.GRASS_DARK)set(bx,by+1,bz,V.MUSHROOM);}
+}
+
+// Helper that works in absolute voxel space (for town square fill)
+function fill2(ax,az,yo,w,h,d,t){
+  const bx=Math.round(CX+ax),bz=Math.round(CZ+az),by=sY(ax,az);
+  for(let dx=0;dx<w;dx++)for(let dy=0;dy<h;dy++)for(let dz=0;dz<d;dz++)set(bx+dx,by+yo+dy,bz+dz,t);
+}
+
+// ─── Mesher ──────────────────────────────────────────────────────────────────
+const FACES=[
+  {dir:[1,0,0],norm:[1,0,0],c:[[1,0,0],[1,1,0],[1,1,1],[1,0,1]]},
+  {dir:[-1,0,0],norm:[-1,0,0],c:[[0,0,1],[0,1,1],[0,1,0],[0,0,0]]},
+  {dir:[0,1,0],norm:[0,1,0],c:[[0,1,1],[1,1,1],[1,1,0],[0,1,0]]},
+  {dir:[0,-1,0],norm:[0,-1,0],c:[[0,0,0],[1,0,0],[1,0,1],[0,0,1]]},
+  {dir:[0,0,1],norm:[0,0,1],c:[[1,0,1],[1,1,1],[0,1,1],[0,0,1]]},
+  {dir:[0,0,-1],norm:[0,0,-1],c:[[0,0,0],[0,1,0],[1,1,0],[1,0,0]]},
+];
+function terrNorm(x,z){
+  const h0=surfaceY[Math.max(0,x-1)+z*W],h2=surfaceY[Math.min(W-1,x+1)+z*W];
+  const h3=surfaceY[x+Math.max(0,z-1)*W],h4=surfaceY[x+Math.min(D-1,z+1)*W];
+  const nx=(h0-h2)*.45,nz=(h3-h4)*.45,ny=1,l=Math.sqrt(nx*nx+ny*ny+nz*nz);return[nx/l,ny/l,nz/l];
+}
+function vertAO(fx,fy,fz,cx,cy,cz,nx,ny,nz){
+  const dx=cx===0?-1:1,dy=cy===0?-1:1,dz=cz===0?-1:1;
+  let s1,s2,corner;
+  if(nx!==0){s1=isSolid(fx,fy+dy,fz)?1:0;s2=isSolid(fx,fy,fz+dz)?1:0;corner=isSolid(fx,fy+dy,fz+dz)?1:0;}
+  else if(ny!==0){s1=isSolid(fx+dx,fy,fz)?1:0;s2=isSolid(fx,fy,fz+dz)?1:0;corner=isSolid(fx+dx,fy,fz+dz)?1:0;}
+  else{s1=isSolid(fx+dx,fy,fz)?1:0;s2=isSolid(fx,fy+dy,fz)?1:0;corner=isSolid(fx+dx,fy+dy,fz)?1:0;}
+  return 1-(s1+s2+corner)*0.28;
+}
+function buildMeshes(){
+  const op={pos:[],nrm:[],col:[],idx:[],vi:0},gl={pos:[],nrm:[],col:[],idx:[],vi:0};
+  for(let y=0;y<H;y++)for(let z=0;z<D;z++)for(let x=0;x<W;x++){
+    const type=get(x,y,z);if(type===V.AIR)continue;
+    const glass=isGlass(type),buf=glass?gl:op;
+    const hex=VC[type];
+    let r=((hex>>16)&0xff)/255,g=((hex>>8)&0xff)/255,b=(hex&0xff)/255;
+    const vary=cHash(x,y,z)*0.09;r=Math.max(0,Math.min(1,r+vary*r));g=Math.max(0,Math.min(1,g+vary*g));b=Math.max(0,Math.min(1,b+vary*b));
+    for(const f of FACES){
+      const[nx,ny,nz]=f.dir,nbr=get(x+nx,y+ny,z+nz);
+      if(!isTransp(nbr)&&!isGlass(nbr))continue;
+      if((type===V.WATER||type===V.WATER_SHALLOW)&&nbr===type)continue;
+      if(type===V.DEEP_WATER&&nbr===V.DEEP_WATER)continue;
+      if(glass&&nbr===type)continue;
+      let fnx=f.norm[0],fny=f.norm[1],fnz=f.norm[2];
+      if(ny===1&&TERRAIN.has(type))[fnx,fny,fnz]=terrNorm(x,z);
+      const ao=f.c.map(([cx,cy,cz])=>vertAO(x+nx,y+ny,z+nz,cx,cy,cz,nx,ny,nz));
+      const bvi=buf.vi;
+      for(let i=0;i<4;i++){const[cx,cy,cz]=f.c[i],a=ao[i];buf.pos.push((x+cx)*VS,(y+cy)*VS,(z+cz)*VS);buf.nrm.push(fnx,fny,fnz);buf.col.push(r*a,g*a,b*a);buf.vi++;}
+      if(ao[0]+ao[2]>ao[1]+ao[3])buf.idx.push(bvi,bvi+1,bvi+2,bvi,bvi+2,bvi+3);
+      else buf.idx.push(bvi+1,bvi+2,bvi+3,bvi,bvi+1,bvi+3);
+    }
+  }
+  return{op,gl};
+}
+function makeGeo({pos,nrm,col,idx}){const g=new THREE.BufferGeometry();g.setAttribute('position',new THREE.Float32BufferAttribute(pos,3));g.setAttribute('normal',new THREE.Float32BufferAttribute(nrm,3));g.setAttribute('color',new THREE.Float32BufferAttribute(col,3));g.setIndex(idx);g.computeBoundingSphere();return g;}
+
+// ─── Three.js ────────────────────────────────────────────────────────────────
+const OX=CX*VS,OZ=CZ*VS;
+const canvas=document.getElementById('c');
+const renderer=new THREE.WebGLRenderer({canvas,antialias:true,logarithmicDepthBuffer:true});
+renderer.setPixelRatio(Math.min(devicePixelRatio,2));renderer.setSize(innerWidth,innerHeight);
+renderer.toneMapping=THREE.ACESFilmicToneMapping;renderer.toneMappingExposure=1.2;
+renderer.shadowMap.enabled=true;renderer.shadowMap.type=THREE.PCFSoftShadowMap;
+const scene=new THREE.Scene();scene.fog=new THREE.FogExp2(0x87ceeb,.0015);
+const camera=new THREE.PerspectiveCamera(52,innerWidth/innerHeight,.3,1200);
+camera.position.set(OX+60,44,OZ+90);camera.lookAt(OX,SEA*VS+2,OZ);
+const controls=new OrbitControls(camera,canvas);
+controls.target.set(OX,SEA*VS+2,OZ);controls.enableDamping=true;controls.dampingFactor=.07;
+controls.maxPolarAngle=Math.PI*.47;controls.minDistance=2;controls.maxDistance=340;controls.update();
+
+const sun=new THREE.DirectionalLight(0xfff5e0,2.8);sun.castShadow=true;
+sun.shadow.mapSize.set(2048,2048);sun.shadow.camera.near=1;sun.shadow.camera.far=1000;
+const sc=200*VS;sun.shadow.camera.left=-sc;sun.shadow.camera.right=sc;sun.shadow.camera.top=sc;sun.shadow.camera.bottom=-sc;
+scene.add(sun);
+const ambient=new THREE.AmbientLight(0x8ab4d4,.5);scene.add(ambient);
+const hemi=new THREE.HemisphereLight(0x87ceeb,0x4a7c2f,.4);scene.add(hemi);
+const skyM=new THREE.Mesh(new THREE.SphereGeometry(900,32,16),new THREE.MeshBasicMaterial({color:0x87ceeb,side:THREE.BackSide}));scene.add(skyM);
+
+// Stars
+{const sg=new THREE.BufferGeometry(),sp=[];for(let i=0;i<2000;i++){const a=rnd()*Math.PI*2,b=rnd()*Math.PI*.5,r=580;sp.push(r*Math.cos(b)*Math.cos(a),r*Math.sin(b),r*Math.cos(b)*Math.sin(a));}sg.setAttribute('position',new THREE.Float32BufferAttribute(sp,3));const sm=new THREE.Points(sg,new THREE.PointsMaterial({color:0xffffff,size:1.5,sizeAttenuation:true,transparent:true,opacity:0}));scene.add(sm);scene._stars=sm;}
+
+// Animated water
+const waterSeg=96;
+const waterGeo=new THREE.PlaneGeometry(W*VS*6,D*VS*6,waterSeg,waterSeg);
+const waterMat=new THREE.MeshStandardMaterial({color:0x2a8ab5,roughness:.04,metalness:.18,transparent:true,opacity:.9});
+const waterMesh=new THREE.Mesh(waterGeo,waterMat);waterMesh.rotation.x=-Math.PI/2;waterMesh.position.set(OX,(SEA-.2)*VS,OZ);scene.add(waterMesh);
+const waterPos=waterGeo.attributes.position;
+const solidMat=new THREE.MeshStandardMaterial({vertexColors:true,roughness:.8,metalness:.02});
+const glassMat=new THREE.MeshStandardMaterial({vertexColors:true,roughness:.04,metalness:.12,transparent:true,opacity:.55,side:THREE.DoubleSide});
+
+// Lantern lights
+const lanternLights=[];
+for(const[wx,wz]of[[0,0],[S*16,S*108],[-S*30,-S*17],[S*24,-S*17],[S*36,S*16],[-S*40,S*16],[-S*5,-S*27],[S*17,-S*31]]){
+  const by=sY(wx,wz);const pl=new THREE.PointLight(0xffaa44,0,0);pl.position.set((CX+wx)*VS,(by+S*4)*VS,(CZ+wz)*VS);scene.add(pl);lanternLights.push(pl);
+}
+
+// ─── Wildlife (all positions scaled by S) ────────────────────────────────────
+const entities=[];
+const M={white:new THREE.MeshLambertMaterial({color:0xf5f5f5}),cream:new THREE.MeshLambertMaterial({color:0xf0e8d0}),tan:new THREE.MeshLambertMaterial({color:0xc8a070}),brown:new THREE.MeshLambertMaterial({color:0x7a4e18}),grey:new THREE.MeshLambertMaterial({color:0x888888}),red:new THREE.MeshLambertMaterial({color:0xd03020}),blue:new THREE.MeshLambertMaterial({color:0x3a90c8}),yellow:new THREE.MeshLambertMaterial({color:0xf0c000}),black:new THREE.MeshLambertMaterial({color:0x222222}),};
+const B=(w,h,d,m)=>new THREE.Mesh(new THREE.BoxGeometry(w,h,d),m);
+const tw=(wx,wz)=>surfaceY[Math.max(0,Math.min(W-1,Math.round(CX+wx*S)))+Math.max(0,Math.min(D-1,Math.round(CZ+wz*S)))*W]*VS;
+
+// Wildlife helpers with world-space units (VS-aware)
+function seagull(vx,vy,vz){const g=new THREE.Group();g.add(B(.4*VS,.22*VS,.9*VS,M.white));const head=B(.28*VS,.22*VS,.3*VS,M.white);head.position.set(0,.1*VS,.55*VS);const beak=B(.1*VS,.08*VS,.22*VS,M.yellow);beak.position.set(0,.04*VS,.77*VS);const wL=B(2.4*VS,.06*VS,.5*VS,M.white);wL.position.set(-1.3*VS,.05*VS,0);const wR=wL.clone();wR.position.x=1.3*VS;const tL=B(.5*VS,.06*VS,.4*VS,M.black);tL.position.set(-2.2*VS,.05*VS,.1*VS);const tR=tL.clone();tR.position.x=2.2*VS;g.add(head,beak,wL,wR,tL,tR);scene.add(g);const ang=rnd()*Math.PI*2,rad=(14+rnd()*18)*VS,spd=(.35+rnd()*.25)*(rnd()<.5?1:-1),ap=rnd()*Math.PI*2,fp=rnd()*Math.PI*2;entities.push({update(_dt,now){const a=ang+now*.001*spd;g.position.set(vx+Math.cos(a)*rad,vy+Math.sin(now*.0007+ap)*4*VS,vz+Math.sin(a)*rad);g.rotation.y=-a-Math.PI*.5*Math.sign(spd);const fl=Math.sin(now*.006+fp)*.45;wL.rotation.z=fl;wR.rotation.z=-fl;tL.rotation.z=fl*.8;tR.rotation.z=-fl*.8;}});}
+for(let i=0;i<4;i++)seagull(OX+rF(-8,8)*VS,26*VS+rF(0,8)*VS,OZ+(S*118+rF(-6,6))*VS);
+for(let i=0;i<3;i++)seagull(OX+rF(-14,14)*VS,22*VS,OZ+rF(-22,22)*VS);
+
+function sheep(wx,wz){const g=new THREE.Group();const body=B(1.6*VS,.9*VS,2.2*VS,M.white);body.position.y=.85*VS;g.add(body);for(const[bx,bz]of[[0,.5],[.4,0],[-.4,0],[0,-.5]]){const b=B(.7*VS,.5*VS,.7*VS,M.cream);b.position.set(bx*VS,1.4*VS,bz*VS);g.add(b);}const head=B(.5*VS,.55*VS,.6*VS,M.tan);head.position.set(0,1.1*VS,1.3*VS);const snout=B(.3*VS,.3*VS,.3*VS,M.tan);snout.position.set(0,.9*VS,1.62*VS);g.add(head,snout);for(const[lx,,lz]of[[-.55,0,-.7],[.55,0,-.7],[-.55,0,.7],[.55,0,.7]]){const leg=B(.3*VS,.7*VS,.3*VS,M.tan);leg.position.set(lx*VS,.35*VS,lz*VS);g.add(leg);}scene.add(g);g.position.set((CX+wx*S)*VS,tw(wx,wz)+.05,(CZ+wz*S)*VS);let tx=wx,tz=wz,timer=rF(2,5);entities.push({update(dt,now){timer-=dt;if(timer<=0){tx=wx+rF(-24,24);tz=wz+rF(-24,24);timer=rF(1.5,4);}const dx=(CX+tx*S)*VS-g.position.x,dz=(CZ+tz*S)*VS-g.position.z,dist=Math.sqrt(dx*dx+dz*dz);if(dist>.8*VS){g.position.x+=dx/dist*1.2*VS*dt;g.position.z+=dz/dist*1.2*VS*dt;g.rotation.y=Math.atan2(dx,dz);head.rotation.x=0;}else{head.rotation.x=Math.sin(now*.0015)*.3;}const gx=Math.max(0,Math.min(W-1,Math.round(g.position.x/VS))),gz=Math.max(0,Math.min(D-1,Math.round(g.position.z/VS)));g.position.y=surfaceY[gx+gz*W]*VS+.05;}});}
+for(let i=0;i<7;i++)sheep(-78+rF(-14,14),44+rF(-10,10));
+
+function deer(wx,wz){const g=new THREE.Group();const body=B(.9*VS,VS,2*VS,M.tan);body.position.y=1.1*VS;const neck=B(.35*VS,.8*VS,.4*VS,M.tan);neck.position.set(0,1.9*VS,.85*VS);neck.rotation.x=-.3;const hG=new THREE.Group();hG.position.set(0,2.3*VS,1.15*VS);const head=B(.45*VS,.5*VS,.65*VS,M.tan);const aL=B(.08*VS,.7*VS,.08*VS,M.brown);aL.position.set(-.28*VS,.7*VS,-.05*VS);const aR=aL.clone();aR.position.x=.28*VS;const brL=B(.4*VS,.08*VS,.08*VS,M.brown);brL.position.set(-.45*VS,.85*VS,-.05*VS);const brR=brL.clone();brR.position.x=.45*VS;hG.add(head,aL,aR,brL,brR);for(const[lx,,lz]of[[-.35,0,-.7],[.35,0,-.7],[-.35,0,.7],[.35,0,.7]]){const leg=B(.28*VS,VS,.28*VS,M.tan);leg.position.set(lx*VS,.5*VS,lz*VS);g.add(leg);}g.add(body,neck,hG);scene.add(g);g.position.set((CX+wx*S)*VS,tw(wx,wz)+.05,(CZ+wz*S)*VS);let tx=wx,tz=wz,wt=rF(3,8);entities.push({update(dt,now){wt-=dt;if(wt<=0){tx=wx+rF(-34,34);tz=wz+rF(-34,34);wt=rF(4,10);}const dx=(CX+tx*S)*VS-g.position.x,dz=(CZ+tz*S)*VS-g.position.z,dist=Math.sqrt(dx*dx+dz*dz);if(dist>VS){g.position.x+=dx/dist*1.8*VS*dt;g.position.z+=dz/dist*1.8*VS*dt;g.rotation.y=Math.atan2(dx,dz);hG.rotation.x=Math.sin(now*.004)*.1;}else{hG.rotation.x=Math.sin(now*.0012)*.35;}const gx=Math.max(0,Math.min(W-1,Math.round(g.position.x/VS))),gz=Math.max(0,Math.min(D-1,Math.round(g.position.z/VS)));g.position.y=surfaceY[gx+gz*W]*VS+.05;}});}
+for(let i=0;i<4;i++)deer(56+rF(0,26),44+rF(-10,32));
+
+// Whale
+{const wg=new THREE.Group();wg.add(B(3*VS,2.5*VS,10*VS,M.blue),B(2.6*VS,2.2*VS,4*VS,M.blue),B(.5*VS,2.5*VS,2.5*VS,M.blue),B(2.4*VS,2.2*VS,9*VS,M.white));scene.add(wg);let wa=0;entities.push({update(dt,now){wa+=dt*.055;const yo=Math.sin(wa*2.5)*2.5*VS,dive=Math.sin(wa*.7);wg.position.set(OX+Math.cos(wa)*70*VS,(SEA-2)*VS+yo+(dive<-.6?dive*8*VS:0),OZ+Math.sin(wa)*70*VS*.6);wg.rotation.y=-wa-Math.PI*.5;wg.rotation.x=dive<-.5?-.4:Math.sin(now*.0008)*.08;}});}
+
+// Boats
+function boat(wx,wz,hullHex,mast){const g=new THREE.Group(),hM=new THREE.MeshLambertMaterial({color:hullHex});g.add(B(2.2*VS,1.2*VS,5.5*VS,hM),B(2*VS,.25*VS,5*VS,M.cream),B(1.4*VS,1.2*VS,2.2*VS,M.white));if(mast){g.add(B(.15*VS,5.5*VS,.15*VS,M.brown),B(.08*VS,2.8*VS,2.2*VS,M.white));}g.position.set((CX+wx*S)*VS,(SEA-.4)*VS,(CZ+wz*S)*VS);scene.add(g);const ph=rnd()*Math.PI*2;entities.push({update(_dt,now){g.position.y=(SEA-.4)*VS+Math.sin(now*.0009+ph)*.18*VS;g.rotation.z=Math.sin(now*.0007+ph)*.03;}});}
+boat(-8,106,0xcc2a18,false);boat(10,110,0xf5f0e8,true);
+
+// ─── Day/night ────────────────────────────────────────────────────────────────
+const DAY=170;
+const KEYS=[[.00,0x030c1a,0x101840,.05,.08],[.18,0xd4602a,0xff9028,.85,.30],[.28,0x87ceeb,0xfff5e0,2.50,.52],[.50,0x60aadc,0xfffce0,2.90,.60],[.72,0x87ceeb,0xfff5e0,2.50,.55],[.82,0xd06030,0xff6822,.95,.36],[.92,0x181830,0x2030a0,.18,.13],[1.0,0x030c1a,0x101840,.05,.08]];
+const _tc=new THREE.Color(),_td=new THREE.Color();
+const evalK=t=>{let i=0;while(i<KEYS.length-1&&KEYS[i+1][0]<t)i++;const k0=KEYS[i],k1=KEYS[i+1],f=(t-k0[0])/(k1[0]-k0[0]);return{sky:_tc.set(k0[1]).lerp(_td.set(k1[1]),f).clone(),sunC:_tc.set(k0[2]).lerp(_td.set(k1[2]),f).clone(),sunI:k0[3]+(k1[3]-k0[3])*f,ambI:k0[4]+(k1[4]-k0[4])*f};};
+let gTime=.28;
+function updateSky(t){const{sky,sunC,sunI,ambI}=evalK(t);const a=t*Math.PI*2-Math.PI*.5;sun.position.set(OX+Math.cos(a)*400,Math.sin(a)*340,OZ+Math.sin(a)*150);sun.color.copy(sunC);sun.intensity=sunI;ambient.intensity=ambI;hemi.intensity=ambI*.6;skyM.material.color.copy(sky);scene.fog.color.copy(sky);renderer.setClearColor(sky);waterMat.color.set(0x2a8ab5).lerp(sky,.2);const nightness=Math.max(0,(.9-t<0)?1+(.9-t)*10:(t<.18)?1-t/.18:0);scene._stars.material.opacity=nightness*.85;const li=nightness*14;for(const lp of lanternLights)lp.intensity=li;const h=Math.floor(t*24),m=Math.floor((t*24-h)*60);document.getElementById('time').textContent=`${String(h).padStart(2,'0')}:${String(m).padStart(2,'0')}`;}
+
+window.addEventListener('resize',()=>{camera.aspect=innerWidth/innerHeight;camera.updateProjectionMatrix();renderer.setSize(innerWidth,innerHeight);});
+
+// ─── Build ────────────────────────────────────────────────────────────────────
+const lstat=document.getElementById('lstatus'),lfill=document.getElementById('lfill');
+const defer=(fn,p)=>new Promise(r=>setTimeout(()=>{fn();lfill.style.width=p+'%';r();},16));
+let wStats={verts:0,tris:0};
+
+async function build(){
+  lstat.textContent='sculpting terrain…';lfill.style.width='5%';
+  await defer(generateTerrain,25);
+  lstat.textContent='carving stream…';
+  await defer(carveStream,34);
+  lstat.textContent='placing buildings & landscape…';
+  await defer(placeFeatures,62);
+  lstat.textContent='meshing (this takes a moment)…';
+  const meshes=await new Promise(r=>setTimeout(()=>r(buildMeshes()),16));
+  lfill.style.width='90%';
+  const oGeo=makeGeo(meshes.op),gGeo=makeGeo(meshes.gl);
+  const sm=new THREE.Mesh(oGeo,solidMat);sm.castShadow=true;sm.receiveShadow=true;scene.add(sm);
+  const gm=new THREE.Mesh(gGeo,glassMat);scene.add(gm);
+  wStats={verts:oGeo.attributes.position.count+gGeo.attributes.position.count,tris:((oGeo.index?.count||0)+(gGeo.index?.count||0))/3};
+  lfill.style.width='100%';setTimeout(()=>document.getElementById('loading').style.display='none',200);
+}
+
+// ─── Render loop ──────────────────────────────────────────────────────────────
+let last=0,fps=60,fpsA=0,fpsN=0,waveT=0;
+const statsEl=document.getElementById('stats');
+
+function loop(now){
+  requestAnimationFrame(loop);const dt=Math.min((now-last)/1000,.1);last=now;
+  fpsA+=dt;fpsN++;if(fpsA>=1){fps=Math.round(fpsN/fpsA);fpsA=0;fpsN=0;}
+  gTime=(gTime+dt/DAY)%1;updateSky(gTime);
+  waveT=now*.001;
+  for(let i=0;i<waterPos.count;i++){const px=waterPos.getX(i),pz=waterPos.getZ(i);waterPos.setY(i,(Math.sin(px*.18+waveT*1.1)*.32+Math.sin(pz*.14+waveT*.75)*.26+Math.sin((px+pz)*.09+waveT)*.14)*VS);}
+  waterPos.needsUpdate=true;waterGeo.computeVertexNormals();
+  for(const e of entities)e.update(dt,now);
+  controls.update();renderer.render(scene,camera);
+  statsEl.textContent=`${fps} fps\n${(wStats.verts/1000).toFixed(0)}k verts\n${(wStats.tris/1000).toFixed(0)}k tris\n${entities.length} creatures`;
+}
+
+build().then(()=>requestAnimationFrame(loop));
+</script>
+</body>
+</html>
