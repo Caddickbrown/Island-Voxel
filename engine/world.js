@@ -61,12 +61,12 @@ export class World {
         const wy = cy*C+ly;
         const i = lx + lz*C + ly*C*C;
         if (wy > ty) {
-          data[i] = (wy <= SEA_LEVEL && h <= 0.2) ? VT.WATER : VT.AIR;
+      data[i] = (wy <= SEA_LEVEL && h <= 0.2) ? VT.WATER : VT.AIR;
         } else {
           const depth = ty - wy;
           const biome = getBiome(rwx, rwz, h, S);
           const name  = getSurfaceVoxel(biome, depth);
-          data[i] = VT[name] ?? VT.STONE;
+          data[i] = VT[name] !== undefined ? VT[name] : VT.STONE;
         }
       }
     }
@@ -134,7 +134,7 @@ export class World {
       [1,0,1],[1,0,-1],[-1,0,1],[-1,0,-1] // diagonals for AO corners
     ]) {
       const k = `${dx},${dy},${dz}`;
-      if (!nbrs[k]) nbrs[k] = this.chunks.get(this._ck(cx+dx,cy+dy,cz+dz)) ?? null;
+      if (!nbrs[k]) nbrs[k] = this.chunks.get(this._ck(cx+dx,cy+dy,cz+dz)) || null;
     }
     return { data, nbrs };
   }

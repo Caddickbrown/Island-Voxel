@@ -87,7 +87,7 @@ export function buildChunkMesh(chunkData, cx, cy, cz, neighbourData={}, lod=0) {
     if(lod>=2 && gL(chunkData,neighbourData,lx,ly+1,lz)!==0) continue;
 
     const glass=isG(type), buf=glass?gl:op;
-    const hex=VCOLOR[type]??0x888888;
+    const hex = VCOLOR[type] !== undefined ? VCOLOR[type] : 0x888888;
     let r=((hex>>16)&0xff)/255, g2=((hex>>8)&0xff)/255, b=(hex&0xff)/255;
     const vary=cHash(ox+lx,oy+ly,oz+lz)*0.08;
     r=Math.max(0,Math.min(1,r+vary*r)); g2=Math.max(0,Math.min(1,g2+vary*g2)); b=Math.max(0,Math.min(1,b+vary*b));

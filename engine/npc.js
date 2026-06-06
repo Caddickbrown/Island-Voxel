@@ -60,8 +60,8 @@ export class NPC {
 
     // ── Mesh (blocky humanoid) ───────────────────────────────────────────────
     this.group = new THREE.Group();
-    const skin  = mat(def.skinTone ?? 0xd4956a);
-    const hair  = mat(def.hairColor ?? 0x3d1a00);
+    const skin  = mat(def.skinTone !== undefined ? def.skinTone : 0xd4956a);
+    const hair  = mat(def.hairColor !== undefined ? def.hairColor : 0x3d1a00);
     const shirt = mat(def.color);
     const pants = mat(this._darken(def.color, 0.65));
     const shoe  = mat(0x2a1a0a);
@@ -238,14 +238,14 @@ export class NPC {
 
   // Returns dialogue for this NPC
   getDialogue(dialogueBank) {
-    const lines = dialogueBank[this.name] ?? dialogueBank[this.job] ?? ['Hello!'];
+    const lines = dialogueBank[this.name] || dialogueBank[this.job] || ['Hello!'];
     const line = lines[this._dialogueIdx % lines.length];
     this._dialogueIdx++;
     return { name: this.name, job: this.job, line };
   }
 
   destroy() {
-    this.group.parent?.remove(this.group);
+    if (this.group.parent) this.group.parent.remove(this.group);
   }
 }
 
@@ -272,7 +272,7 @@ export class NPCManager {
     npc.setAreaPositions(this._areaPositions);
     // Place at starting area
     const entry = npc.schedule[0];
-    const startKey = entry?.[2];
+    const startKey = entry ? entry[2] : null;
     const startPos = this._areaPositions[startKey];
     if (startPos) {
       npc.group.position.copy(startPos);

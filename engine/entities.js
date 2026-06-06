@@ -9,7 +9,7 @@ export class Entity {
     this.alive = true;
   }
   update(_dt, _now) {}
-  destroy() { this.alive = false; this.mesh.parent?.remove(this.mesh); }
+  destroy() { this.alive = false; if (this.mesh.parent) this.mesh.parent.remove(this.mesh); }
 }
 
 export class EntityManager {

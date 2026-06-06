@@ -141,15 +141,15 @@ export class Input {
 
     // Gamepad
     let gpx = 0, gpz = 0, gplx = 0, gply = 0;
-    const pads = navigator.getGamepads?.() ?? [];
+    const pads = navigator.getGamepads ? navigator.getGamepads() : [];
     for (const gp of pads) {
       if (!gp) continue;
       gpx = gp.axes[0]; gpz = gp.axes[1];
       gplx = gp.axes[2]; gply = gp.axes[3];
-      if (gp.buttons[0]?.pressed && !this._down.has('jump')) { this._pressed.add('jump'); this._down.add('jump'); }
-      if (!gp.buttons[0]?.pressed) this._down.delete('jump');
-      if (gp.buttons[2]?.pressed && !this._down.has('interact')) { this._pressed.add('interact'); this._down.add('interact'); }
-      if (!gp.buttons[2]?.pressed) this._down.delete('interact');
+      if (gp.buttons[0] && gp.buttons[0].pressed && !this._down.has('jump')) { this._pressed.add('jump'); this._down.add('jump'); }
+      if (gp.buttons[0] && !gp.buttons[0].pressed) this._down.delete('jump');
+      if (gp.buttons[2] && gp.buttons[2].pressed && !this._down.has('interact')) { this._pressed.add('interact'); this._down.add('interact'); }
+      if (gp.buttons[2] && !gp.buttons[2].pressed) this._down.delete('interact');
       break;
     }
     if (Math.abs(gplx) > 0.1) this._ldx += gplx * 0.04;
