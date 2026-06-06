@@ -1,4 +1,5 @@
-// engine/terrain.js — Heightmap + zone-based biome generator
+// engine/terrain.js — Heightmap + zone system matching full Island spec
+// Scene.js coords ÷ 5 → logical units (island radius ~62)
 
 const _P = new Uint8Array(512);
 let _init = false;
@@ -28,149 +29,231 @@ export function fbm(x,z,o=5) {
   return v/m;
 }
 
-// ─── Zone definitions (in logical units, pre-scale) ───────────────────────
-// Island radius ~62 logical units
-// Town:     centre, radius ~18
-// Plains:   surrounds town, extends to radius ~45, south/east bias
-// Forest:   NE quadrant, roughly 30–70 units from centre
-// Mountain: NW corner, centred at (-46, -52), radius ~30
-// Coast:    the outer ring, 0–12 units inside the shoreline
+// ─── Landmark centres (logical units, pre-scale) ───────────────────────────
+const MOUNTAIN_X = -46, MOUNTAIN_Z = -52; // NW
+const TOWN_X = 0,       TOWN_Z = 0;
+
+function dist2(ax,az,bx,bz){ return Math.sqrt((ax-bx)**2+(az-bz)**2); }
 
 /**
- * getZone(lwx, lwz) — logical coords (pre-scale), returns zone string.
- * Called by getBiome for spatial layout.
+ * getZone(lwx, lwz) — returns zone string for a logical-coordinate position.
+ * Called from getBiome and islandHeight for zone-specific behaviour.
  */
 export function getZone(lwx, lwz) {
-  const d = Math.sqrt(lwx*lwx + lwz*lwz);
+  const d    = dist2(lwx, lwz, 0, 0);
+  const a    = Math.atan2(lwz, lwx);
+  const mDist = dist2(lwx, lwz, MOUNTAIN_X, MOUNTAIN_Z);
 
-  // Mountain (NW)
-  const md = Math.sqrt((lwx+46)**2 + (lwz+52)**2);
-  if (md < 32) return 'mountain';
+  // ── Mountain & summit ────────────────────────────────────────────────────
+  if (mDist < 10) return 'summit';
+  if (mDist < 28) return 'mountain';
 
-  // Town (centre)
-  if (d < 18) return 'town';
+  // ── Highland forest (NW, between mountain and plains) ───────────────────
+  if (a > -2.4 && a < -0.8 && d > 28 && d < 55 && mDist > 28) return 'highland_forest';
 
-  // Forest (NE quadrant: positive X, negative-to-neutral Z)
-  // angle roughly -0.3 to 1.5 radians (east to NE)
-  const a = Math.atan2(lwz, lwx);
-  if (d > 14 && d < 68 && a > -0.4 && a < 1.6) return 'forest';
+  // ── Wind ridge (N, slightly elevated) ───────────────────────────────────
+  if (a > -1.5 && a < -0.6 && d > 30 && d < 52) return 'wind_ridge';
 
-  // Coast (outer ring, inside shoreline by ~10 units)
+  // ── Clifftops (NW coast) ─────────────────────────────────────────────────
+  if (a > -2.8 && a < -1.4 && d > 44 && d < 68) return 'clifftops';
+
+  // ── Town core ────────────────────────────────────────────────────────────
+  if (d < 20) return 'town';
+
+  // ── Village (N of town) ──────────────────────────────────────────────────
+  if (a > -1.2 && a < 0.3 && d > 14 && d < 32) return 'village';
+
+  // ── Market town (SW of centre) ───────────────────────────────────────────
+  if (a > 2.0 && a < 3.0 && d > 20 && d < 45) return 'market_town';
+
+  // ── The Commons (E of town) ──────────────────────────────────────────────
+  if (a > -0.3 && a < 0.6 && d > 8 && d < 28) return 'the_commons';
+
+  // ── Forest (NE quadrant) ─────────────────────────────────────────────────
+  if (a > -0.4 && a < 1.6 && d > 16 && d < 68) return 'forest';
+
+  // ── River valley (E, flowing S — roughly 30–70 east) ────────────────────
+  if (a > 0.2 && a < 1.0 && d > 20 && d < 55) return 'river_valley';
+
+  // ── Community farm (far W) ───────────────────────────────────────────────
+  if (a > 2.4 || a < -2.8 && d > 38 && d < 62) return 'community_farm';
+
+  // ── Plains/farm (W–SW) ───────────────────────────────────────────────────
+  if ((a > 1.6 || a < -2.0) && d > 14 && d < 55) return 'plains';
+
+  // ── Orchard (W, between farm and coast) ─────────────────────────────────
+  if (a > 2.2 && a < 2.8 && d > 44 && d < 60) return 'orchard';
+
+  // ── Harbour/dock (S) ─────────────────────────────────────────────────────
+  if (a > 1.1 && a < 2.1 && d > 50) return 'harbour';
+
+  // ── Fishing village (SE) ─────────────────────────────────────────────────
+  if (a > 1.0 && a < 1.6 && d > 50) return 'fishing_village';
+
+  // ── Salt marsh (W coast, wetland) ────────────────────────────────────────
+  if ((a > 2.6 || a < -2.6) && d > 46) return 'salt_marsh';
+
+  // ── Kelp cove (SW coast) ─────────────────────────────────────────────────
+  if (a > 2.0 && a < 2.8 && d > 54) return 'kelp_cove';
+
+  // ── Tidepools (SW coast, rocky) ──────────────────────────────────────────
+  if (a > 1.8 && a < 2.4 && d > 52) return 'tidepools';
+
+  // ── Sandy bay (SE coast) ─────────────────────────────────────────────────
+  if (a > 0.6 && a < 1.1 && d > 54) return 'sandy_bay';
+
+  // ── Hidden beach (E coast) ───────────────────────────────────────────────
+  if (a > -0.2 && a < 0.4 && d > 56) return 'hidden_beach';
+
+  // ── Coast (outer ring fallback) ──────────────────────────────────────────
   if (d > 50) return 'coast';
 
-  // Plains (everything else — S, SW, W of town)
-  return 'plains';
+  return 'plains'; // fallback
 }
 
 /**
- * islandHeight(wx, wz, S) — voxel offsets from world centre.
- * Returns float height above sea in voxels.
+ * islandHeight(wx, wz, S) — height in voxels above sea.
+ * wx/wz are voxel offsets from world centre.
  */
 export function islandHeight(wx, wz, S=4) {
-  const lwx = wx/S, lwz = wz/S; // logical coords
-  const d = Math.sqrt(lwx*lwx + lwz*lwz);
-  const a = Math.atan2(lwz, lwx);
+  const lwx=wx/S, lwz=wz/S;
+  const d=dist2(lwx,lwz,0,0), a=Math.atan2(lwz,lwx);
 
   // Organic coastline
   const r = 62 + 14*Math.sin(a*3+.22) + 8*Math.sin(a*7+1.38)
               +  4*Math.sin(a*11-.82) + 2*Math.sin(a*17+2.1) + Math.sin(a*23-1.4);
-  const ef = Math.max(0, 1 - d/r);
-  if (ef <= 0) return 0;
-  const fade = Math.min(1, ef * 5);
+  const ef = Math.max(0, 1-d/r);
+  if (ef<=0) return 0;
+  const fade = Math.min(1, ef*5);
   const fs = 1/S;
-
   const zone = getZone(lwx, lwz);
 
-  // ── Mountain (NW) — dramatic standalone peak ────────────────────────────
-  const md = Math.sqrt((lwx+46)**2 + (lwz+52)**2);
-  if (md < 30) {
-    const mf = Math.max(0, 1 - md/30);
-    const cone = S * 52 * mf**1.4;
-    const rough = fbm(wx*fs*.3+8.4, wz*fs*.3+2.6, 4) * S*5 * mf;
-    // Foothills blending into plains
-    const foothills = S*4 * Math.max(0, 1 - md/30)**0.5;
-    return Math.max(foothills, cone + rough);
+  // ── Mountain ─────────────────────────────────────────────────────────────
+  const mDist = dist2(lwx,lwz,MOUNTAIN_X,MOUNTAIN_Z);
+  if (mDist < 30) {
+    const mf = Math.max(0, 1-mDist/30);
+    const cone  = S*52 * mf**1.4;
+    const rough = fbm(wx*fs*.3+8.4,wz*fs*.3+2.6,4) * S*5 * mf;
+    const feet  = S*5  * Math.max(0, 1-mDist/30)**0.4;
+    return Math.max(feet, cone+rough);
   }
 
-  // ── Base height per zone ──────────────────────────────────────────────────
+  // ── Zone height profiles ──────────────────────────────────────────────────
   let h;
-  if (zone === 'town') {
-    // Very flat — consistent S*2 with tiny variation
-    h = S*2 + fbm(wx*fs*.15+0.5, wz*fs*.15+0.5, 3) * S*0.4;
-    h *= fade;
-  }
-  else if (zone === 'plains') {
-    // Gently rolling — max S*3.5, mostly S*2–3
-    h = S*2 * fade;
-    h += fbm(wx*fs*.07+1.1, wz*fs*.07+3.3, 4) * S*2 * fade;
-    h += fbm(wx*fs*.18+5,   wz*fs*.18+2,   3) * S*0.8 * fade;
-    h = Math.max(h, S*1.5 * fade);
-  }
-  else if (zone === 'forest') {
-    // Slightly hillier than plains — dense canopy will define it more than terrain
-    h = S*2.5 * fade;
-    h += fbm(wx*fs*.09+2.2, wz*fs*.09+4.1, 4) * S*2.5 * fade;
-    h += fbm(wx*fs*.22+6,   wz*fs*.22+1.8, 3) * S*1.2 * fade;
-    h = Math.max(h, S*1.8 * fade);
-  }
-  else if (zone === 'coast') {
-    // Low, close to sea — beaches, rock pools, slight variation
-    h = S*1.2 * fade;
-    h += fbm(wx*fs*.12+3.3, wz*fs*.12+1.1, 3) * S*1.5 * fade;
-    // Occasional rocky headlands
-    const headland = fbm(wx*fs*.25+9, wz*fs*.25+6, 2);
-    if (headland > 0.35) h += S*3 * (headland - 0.35) * 2.5 * fade;
-  }
-  else {
-    // Fallback
-    h = S*2 * fade;
+
+  switch(zone) {
+    case 'town':
+    case 'village':
+    case 'market_town':
+    case 'the_commons':
+      h = S*2 + fbm(wx*fs*.15+0.5,wz*fs*.15+0.5,3)*S*0.4;
+      h *= fade;
+      break;
+
+    case 'plains':
+    case 'community_farm':
+    case 'orchard':
+      h = S*2*fade + fbm(wx*fs*.07+1.1,wz*fs*.07+3.3,4)*S*2*fade;
+      h += fbm(wx*fs*.18+5,wz*fs*.18+2,3)*S*0.8*fade;
+      h = Math.max(h, S*1.5*fade);
+      break;
+
+    case 'forest':
+    case 'river_valley':
+      h = S*2.5*fade + fbm(wx*fs*.09+2.2,wz*fs*.09+4.1,4)*S*2.5*fade;
+      h += fbm(wx*fs*.22+6,wz*fs*.22+1.8,3)*S*1.2*fade;
+      h = Math.max(h, S*1.8*fade);
+      break;
+
+    case 'highland_forest':
+      h = S*5*fade + fbm(wx*fs*.1+3,wz*fs*.1+1,4)*S*3.5*fade;
+      h = Math.max(h, S*4*fade);
+      break;
+
+    case 'wind_ridge':
+      h = S*6*fade + fbm(wx*fs*.12+4,wz*fs*.12+2,3)*S*3*fade;
+      h = Math.max(h, S*4.5*fade);
+      break;
+
+    case 'clifftops':
+      h = S*8*fade + fbm(wx*fs*.14+5,wz*fs*.14+7,4)*S*4*fade;
+      h = Math.max(h, S*6*fade);
+      break;
+
+    case 'salt_marsh':
+    case 'kelp_cove':
+    case 'harbour':
+    case 'fishing_village':
+      h = S*1.2*fade + fbm(wx*fs*.12+3,wz*fs*.12+1,3)*S*1*fade;
+      break;
+
+    case 'tidepools':
+      h = S*1.5*fade + fbm(wx*fs*.18+7,wz*fs*.18+3,3)*S*2*fade;
+      const tRock = fbm(wx*fs*.3+12,wz*fs*.3+8,2);
+      if (tRock>0.3) h += S*3*(tRock-0.3)*2.5*fade;
+      break;
+
+    case 'sandy_bay':
+    case 'hidden_beach':
+      h = S*1.2*fade + fbm(wx*fs*.1+2,wz*fs*.1+5,3)*S*0.8*fade;
+      break;
+
+    case 'coast':
+    default:
+      h = S*1.3*fade + fbm(wx*fs*.12+3.3,wz*fs*.12+1.1,3)*S*1.5*fade;
+      const headland = fbm(wx*fs*.25+9,wz*fs*.25+6,2);
+      if (headland>0.35) h += S*3*(headland-0.35)*2.5*fade;
+      break;
   }
 
-  // Dock spit (south) — keep very flat
-  const dd = Math.sqrt(lwx*lwx + (lwz-62)**2);
-  if (dd < 12) h = Math.max(h*(dd/12), S*1.2*Math.max(0,1-dd/12));
+  // Dock spit flat
+  const dd = dist2(lwx,lwz,0,62);
+  if (dd<12) h = Math.max(h*(dd/12), S*1.2*Math.max(0,1-dd/12));
 
   return Math.max(0, h);
 }
 
 /**
- * getBiome(wx, wz, height, S) — surface biome string for colour/voxel selection.
+ * getBiome(wx, wz, height, S) → biome string
  */
 export function getBiome(wx, wz, height, S=4) {
   const lwx=wx/S, lwz=wz/S;
-  if (height <= 0) return 'ocean';
+  if (height<=0) return 'ocean';
 
-  const zone = getZone(lwx, lwz);
-  const md = Math.sqrt((lwx+46)**2 + (lwz+52)**2);
-
-  // Mountain zones
-  if (md < 30) {
-    if (height > S*48) return 'snow';
-    if (height > S*34) return 'mountain_rock';
-    if (height > S*18) return 'mountain_grass';
+  const mDist = dist2(lwx,lwz,MOUNTAIN_X,MOUNTAIN_Z);
+  if (mDist<30) {
+    if (height>S*48) return 'snow';
+    if (height>S*34) return 'mountain_rock';
+    if (height>S*18) return 'mountain_grass';
     return 'mountain_base';
   }
 
-  // Coast biomes
-  if (zone === 'coast') {
-    if (height < S*1.8) return 'beach';
-    const h = fbm(lwx*.25+9, lwz*.25+6, 2);
-    return h > 0.35 ? 'cliff' : 'coast_grass';
-  }
+  const zone = getZone(lwx,lwz);
+  if (height < S*1.8) return 'beach';
+  if (height < S*2.4) return 'pebble';
 
-  // Beach fringe on any zone near shoreline
-  if (height < S*2.0) return 'beach';
-  if (height < S*2.6) return 'pebble';
-
-  // Zone-based surface
-  if (zone === 'forest') return height < S*2.6 ? 'forest_edge' : 'forest';
-  if (zone === 'town')   return 'meadow'; // town surface grass (buildings override)
-  if (zone === 'plains') {
-    // Mix of meadow and dark grass, with patches
-    const n = fbm(lwx*.4+10, lwz*.4+8, 2);
-    return n > 0.2 ? 'meadow_dark' : 'meadow';
+  switch(zone) {
+    case 'salt_marsh':   return 'marsh';
+    case 'tidepools':    return height>S*3 ? 'cliff' : 'rocky_shore';
+    case 'kelp_cove':    return 'coast_grass';
+    case 'sandy_bay':
+    case 'hidden_beach': return height<S*2.2 ? 'beach' : 'coast_grass';
+    case 'clifftops':    return 'cliff';
+    case 'highland_forest': return 'highland_forest';
+    case 'wind_ridge':   return 'highland_grass';
+    case 'forest':       return 'forest';
+    case 'river_valley': return fbm(lwx*.3,lwz*.3,2) > 0.1 ? 'forest' : 'forest_edge';
+    case 'harbour':
+    case 'fishing_village': return 'coast_grass';
+    case 'plains':
+    case 'community_farm':
+    case 'orchard':      return fbm(lwx*.4+10,lwz*.4+8,2)>0.2 ? 'meadow_dark' : 'meadow';
+    case 'town':
+    case 'village':
+    case 'market_town':
+    case 'the_commons':  return 'meadow';
+    default:             return 'meadow';
   }
-  return 'meadow';
 }
 
 /**
@@ -178,18 +261,22 @@ export function getBiome(wx, wz, height, S=4) {
  */
 export function getSurfaceVoxel(biome, depth) {
   switch(biome) {
-    case 'ocean':         return 'DEEP_WATER';
-    case 'beach':         return depth <= 3 ? 'SAND' : 'STONE';
-    case 'pebble':        return depth === 0 ? 'PEBBLE' : depth <= 3 ? 'SAND' : 'STONE';
-    case 'snow':          return depth <= 2 ? 'SNOW' : 'STONE';
-    case 'mountain_rock': return 'STONE';
-    case 'mountain_grass':return depth === 0 ? 'GRASS_HIGH' : depth <= 2 ? 'DIRT' : 'STONE';
-    case 'mountain_base': return depth === 0 ? 'GRASS_DARK' : depth <= 3 ? 'DIRT' : 'STONE';
-    case 'cliff':         return depth === 0 ? 'STONE_DARK' : 'STONE';
-    case 'coast_grass':   return depth === 0 ? 'GRASS' : depth <= 3 ? 'DIRT' : 'STONE';
-    case 'forest':        return depth === 0 ? 'GRASS_DARK' : depth <= 3 ? 'DIRT' : 'STONE';
-    case 'forest_edge':   return depth === 0 ? 'MOSS' : depth <= 3 ? 'DIRT' : 'STONE';
-    case 'meadow_dark':   return depth === 0 ? 'GRASS_DARK' : depth <= 3 ? 'DIRT' : 'STONE';
-    default:              return depth === 0 ? 'GRASS' : depth <= 3 ? 'DIRT' : 'STONE'; // meadow
+    case 'ocean':          return 'DEEP_WATER';
+    case 'beach':          return depth<=3?'SAND':'STONE';
+    case 'pebble':         return depth===0?'PEBBLE':depth<=3?'SAND':'STONE';
+    case 'snow':           return depth<=2?'SNOW':'STONE';
+    case 'mountain_rock':  return 'STONE';
+    case 'mountain_grass': return depth===0?'GRASS_HIGH':depth<=2?'DIRT':'STONE';
+    case 'mountain_base':  return depth===0?'GRASS_DARK':depth<=3?'DIRT':'STONE';
+    case 'cliff':          return 'STONE_DARK';
+    case 'rocky_shore':    return depth===0?'PEBBLE':'STONE';
+    case 'coast_grass':    return depth===0?'GRASS':depth<=3?'DIRT':'STONE';
+    case 'marsh':          return depth===0?'MOSS':depth<=2?'DIRT':'STONE';
+    case 'highland_forest':return depth===0?'GRASS_DARK':depth<=2?'DIRT':'STONE';
+    case 'highland_grass': return depth===0?'GRASS_HIGH':depth<=2?'DIRT':'STONE';
+    case 'forest':         return depth===0?'GRASS_DARK':depth<=3?'DIRT':'STONE';
+    case 'forest_edge':    return depth===0?'MOSS':depth<=3?'DIRT':'STONE';
+    case 'meadow_dark':    return depth===0?'GRASS_DARK':depth<=3?'DIRT':'STONE';
+    default:               return depth===0?'GRASS':depth<=3?'DIRT':'STONE';
   }
 }

@@ -38,6 +38,17 @@
       background:rgba(255,255,255,.18); border:2px solid rgba(255,255,255,.45);
       color:#fff; font-size:18px; display:flex; align-items:center; justify-content:center;
       cursor:pointer; user-select:none; }
+    #dialogue {
+      position:absolute; bottom:80px; left:50%; transform:translateX(-50%);
+      max-width:480px; width:90%;
+      background:rgba(0,0,0,.72); border-radius:10px; padding:14px 18px;
+      backdrop-filter:blur(10px); color:#fff; display:none;
+      border:1px solid rgba(255,255,255,.15);
+    }
+    #dialogue .dname { font:bold 13px Georgia; color:#ffd700; letter-spacing:1px; margin-bottom:4px; }
+    #dialogue .djob  { font:11px Georgia; color:rgba(255,255,255,.5); margin-bottom:10px; }
+    #dialogue .dline { font:14px/1.6 Georgia; color:rgba(255,255,255,.92); }
+    #dialogue .dhint { font:11px monospace; color:rgba(255,255,255,.3); margin-top:10px; text-align:right; }
   </style>
 </head>
 <body>
@@ -55,6 +66,12 @@
     <div id="area"></div>
     <div id="stats"></div>
     <div id="interact" title="Interact (E)">E</div>
+    <div id="dialogue">
+      <div class="dname" id="d-name"></div>
+      <div class="djob"  id="d-job"></div>
+      <div class="dline" id="d-line"></div>
+      <div class="dhint">E to dismiss</div>
+    </div>
   </div>
 
   <script type="importmap">
@@ -65,6 +82,7 @@
   </script>
 
   <script type="module">
+    import * as THREE from 'three';
     import { World, VS, S, SEA_LEVEL, CX, CZ } from './engine/world.js';
     import { Renderer }      from './engine/renderer.js';
     import { ChunkLoader }   from './engine/chunkloader.js';
@@ -73,12 +91,25 @@
     import { Input }         from './engine/input.js';
     import { Player }        from './engine/player.js';
     import { EntityManager, Seagull, Sheep, Deer, Whale, Boat } from './engine/entities.js';
+    import { NPCManager }    from './engine/npc.js';
     import { populateWorld, AREAS } from './game/island.js';
+    import { NPC_DEFS, DIALOGUE } from './game/npcs.js';
 
     const lstatus = document.getElementById('lstatus');
     const lfill   = document.getElementById('lfill');
     const areaEl  = document.getElementById('area');
     const statsEl = document.getElementById('stats');
+
+    // ── Dialogue ─────────────────────────────────────────────────────────────
+    const dialogueEl = document.getElementById('dialogue');
+    let _dialogueTimer = 0;
+    function showDialogue(name, job, line) {
+      document.getElementById('d-name').textContent = name;
+      document.getElementById('d-job').textContent = job;
+      document.getElementById('d-line').textContent = `"${line}"`;
+      dialogueEl.style.display = 'block';
+      _dialogueTimer = 6;
+    }
 
     function setStatus(msg, pct) {
       lstatus.textContent = msg;
@@ -97,6 +128,7 @@
     const world     = new World();
     const input     = new Input(canvas);
     const entities  = new EntityManager();
+    const npcMgr    = new NPCManager(renderer.scene, world, AREAS);
 
     setStatus('generating terrain…', 10);
     await defer(() => {}, 10);
@@ -151,6 +183,42 @@
     // Interact button
     document.getElementById('interact').addEventListener('click', () => input._pressed.add('interact'));
 
+    // Build area → world position map for NPC navigation
+    setStatus('placing NPCs…', 94);
+    const areaPositions = {};
+    for (const [key, area] of Object.entries(AREAS)) {
+      const wx = CX + area.x * S, wz = CZ + area.z * S;
+      const wy = world.getSurfaceY(Math.round(wx), Math.round(wz));
+      // Also add lowercase key variants for schedule lookup
+      areaPositions[key.toLowerCase()] = new THREE.Vector3(wx * VS, wy * VS, wz * VS);
+      // Common aliases used in schedules
+    }
+    // Extra aliases used in schedules that differ from AREAS keys
+    const ALIASES = {
+      beach: 'sandy_bay', southbeach: 'beach_south', eastbeach: 'east_beach',
+      forestpath: 'forest', farm: 'farm', hilltop: 'wind_ridge',
+      dock: 'harbour', science: 'science_center', mill: 'mill',
+      radio: 'radio_station', generalstore: 'general_store',
+      treehouse: 'treehouse', aquarium: 'aquarium', pub: 'pub',
+      school: 'school', library: 'library', cafe: 'cafe', bakery: 'bakery',
+      workshop: 'workshop', lighthouse: 'lighthouse', village: 'village',
+      townSquare: 'town_square', 'mabelhome':'village','gushome':'village',
+      'fernhome':'plains','olivehome':'village','rosahome':'village',
+      'jackhome':'fishing_village','petehome':'plains','barneyhome':'village',
+      'sukihome':'village','clarahome':'village','rexhome':'village',
+      'ottohome':'village','petrahome':'forest','jinhome':'village',
+      'willhome':'village','lenahome':'fishing_village','kaihome':'village',
+      'beahome':'village','elliothome':'village',
+    };
+    for (const [alias, target] of Object.entries(ALIASES)) {
+      if (!areaPositions[alias] && areaPositions[target])
+        areaPositions[alias] = areaPositions[target];
+    }
+    npcMgr.setAreaPositions(areaPositions);
+
+    // Spawn all NPCs
+    for (const def of NPC_DEFS) npcMgr.spawn(def);
+
     lfill.style.width = '100%';
     setStatus('ready', 100);
     await new Promise(r => setTimeout(r, 300));
@@ -190,14 +258,30 @@
       input.update();
       player.update(dt);
       entities.update(dt, now);
+      npcMgr.update(dt, now, player.position);
       water.update(dt);
       dayNight.update(dt);
+
+      // Interaction — talk to nearby NPC
+      if (input.wasPressed('interact')) {
+        const nearby = npcMgr.getNearby(player.position);
+        if (nearby) {
+          const { name, job, line } = nearby.getDialogue(DIALOGUE);
+          showDialogue(name, job, line);
+        }
+      }
 
       // Chunk streaming — feed player position in voxel coords
       loader.tick(player.position.x / VS, player.position.z / VS, VIEW_DIST);
 
       renderer.frustumCull();
       renderer.render();
+
+      // Dialogue auto-dismiss
+      if (_dialogueTimer > 0) {
+        _dialogueTimer -= dt;
+        if (_dialogueTimer <= 0) dialogueEl.style.display = 'none';
+      }
 
       // Area label fade
       if (_areaTimer > 0) {

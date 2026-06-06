@@ -2,26 +2,63 @@
 import { VT, S, SEA_LEVEL, CX, CZ } from '../engine/world.js';
 import { getZone } from '../engine/terrain.js';
 
+// Scene.js coords ÷ 5 → logical units, then multiplied by S in world placement
 export const AREAS = {
-  TOWN_SQUARE:  { x:  0, z:  0,  label: 'Town Square'      },
-  BAKERY:       { x:-24, z:-16,  label: 'Bakery'            },
-  POST_OFFICE:  { x: 22, z:-16,  label: 'Post Office'       },
-  LIBRARY:      { x: 36, z: 16,  label: 'Library'           },
-  WORKSHOP:     { x:-40, z: 16,  label: 'Workshop'          },
-  PUB:          { x:-16, z:-32,  label: 'The Anchor'        },
-  SCHOOL:       { x: 17, z:-31,  label: 'School'            },
-  CAFE:         { x: -5, z:-27,  label: 'The Café'          },
-  DOCK:         { x:  0, z: 98,  label: 'The Dock'          },
-  FARM:         { x:-76, z: 44,  label: 'The Farm'          },
-  LIGHTHOUSE:   { x: 18, z:118,  label: 'Lighthouse'        },
-  WINDMILL:     { x:-62, z: 18,  label: 'The Mill'          },
-  RADIO:        { x: 50, z: 20,  label: 'Radio Station'     },
-  AQUARIUM:     { x: 62, z:-26,  label: "Elliot's Aquarium" },
-  TREEHOUSE:    { x: 72, z: 64,  label: "Petra's Treehouse" },
-  SCIENCE:      { x:-40, z:-80,  label: 'Science Centre'    },
-  CHURCH:       { x:-30, z:-26,  label: "St. Clare's"       },
-  PLAYER_HOME:  { x: -5, z:-32,  label: 'Your Cottage'      },
-  MOUNTAIN_BASE:{ x:-46, z:-52,  label: 'Mountain Trail'    },
+  // Town core
+  TOWN_SQUARE:    { x:  0,   z:  0,   label: 'Town Square'         },
+  VILLAGE:        { x:  0,   z: -14,  label: 'Village'             },
+  BAKERY:         { x: -18,  z: -12,  label: 'Bakery'              },
+  POST_OFFICE:    { x:  18,  z: -12,  label: 'Post Office'         },
+  CAFE:           { x:  -5,  z: -17,  label: 'The Café'            },
+  LIBRARY:        { x:  24,  z:  12,  label: 'Library'             },
+  WORKSHOP:       { x: -24,  z:  12,  label: 'Workshop'            },
+  PUB:            { x:  -9,  z: -21,  label: 'The Anchor'          },
+  SCHOOL:         { x:  12,  z: -21,  label: 'School'              },
+  GENERAL_STORE:  { x:  -6,  z: -14,  label: 'General Store'       },
+  CYCLE_SHOP:     { x:  -9,  z: -27,  label: 'Cycle Shop'          },
+  SPORTS_COURTS:  { x:  33,  z:  -9,  label: 'Sports Courts'       },
+  FITNESS_CENTER: { x:  33,  z: -17,  label: 'Fitness Center'      },
+  THE_COMMONS:    { x:  10,  z:  10,  label: 'The Commons'         },
+  CHURCH:         { x: -22,  z: -20,  label: "St. Clare's"         },
+  PLAYER_HOME:    { x:  -5,  z: -25,  label: 'Your Cottage'        },
+  // Plains / farm
+  FARM:           { x: -54,  z:  24,  label: 'The Farm'            },
+  MILL:           { x: -36,  z:  12,  label: 'The Mill'            },
+  MAINTENANCE:    { x: -32,  z:  21,  label: 'Maintenance'         },
+  COMMUNITY_FARM: { x: -66,  z:  12,  label: 'Community Farm'      },
+  ORCHARD:        { x: -50,  z:  40,  label: 'Orchard'             },
+  // Forest
+  FOREST:         { x:  54,  z:  36,  label: 'Forest Path'         },
+  TREEHOUSE:      { x:  56,  z:  38,  label: "Petra's Treehouse"   },
+  RIVER_VALLEY:   { x:  40,  z:  20,  label: 'River Valley'        },
+  RADIO_STATION:  { x:  33,  z:  15,  label: 'Radio Station'       },
+  // Highland
+  HIGHLAND_FOREST:{ x: -60,  z: -40,  label: 'Highland Forest'     },
+  WIND_RIDGE:     { x:   0,  z: -40,  label: 'Wind Ridge'          },
+  CLIFFTOPS:      { x: -30,  z: -54,  label: 'The Clifftops'       },
+  CLIFFTOP_PATH:  { x: -50,  z: -60,  label: 'Clifftop Path'       },
+  SCIENCE_CENTER: { x: -24,  z: -45,  label: 'Science Centre'      },
+  // Mountain
+  MOUNTAIN_BASE:  { x: -46,  z: -52,  label: 'Mountain Trail'      },
+  THE_SUMMIT:     { x: -46,  z: -52,  label: 'The Summit'          },
+  // Harbour / coast
+  HARBOUR:        { x:   0,  z:  71,  label: 'The Harbour'         },
+  DOCK:           { x:   0,  z:  71,  label: 'The Dock'            },
+  LIGHTHOUSE:     { x:  13,  z:  74,  label: 'The Lighthouse'      },
+  FISHERY_AREA:   { x:   9,  z:  69,  label: 'Fishery'             },
+  FISHING_VILLAGE:{ x:  16,  z:  60,  label: 'Fishing Village'     },
+  KELP_COVE:      { x: -36,  z:  68,  label: 'Kelp Cove'           },
+  AQUARIUM:       { x:  45,  z: -24,  label: "Elliot's Aquarium"   },
+  SANDY_BAY:      { x:  30,  z: -66,  label: 'Sandy Bay'           },
+  EAST_BEACH:     { x:  45,  z: -47,  label: 'East Beach'          },
+  BEACH_SOUTH:    { x:   0,  z: -66,  label: 'South Beach'         },
+  HIDDEN_BEACH:   { x:  60,  z: -70,  label: 'Hidden Beach'        },
+  TIDEPOOLS:      { x: -40,  z: -70,  label: 'Tidepools'           },
+  SALT_MARSH:     { x: -60,  z: -10,  label: 'Salt Marsh'          },
+  RIVER_MOUTH:    { x: -40,  z:  56,  label: 'River Mouth'         },
+  // Market
+  MARKET_TOWN:    { x: -12,  z: -30,  label: 'Market Town'         },
+  KART_TRACK:     { x:  59,  z: -44,  label: 'Kart Track'          },
 };
 
 // ── Helpers (all coords in logical units; multiply by S internally) ────────
