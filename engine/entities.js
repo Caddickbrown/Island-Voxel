@@ -19,19 +19,22 @@ export class EntityManager {
   update(dt, now) { for (const e of this.entities) if (e.alive) e.update(dt, now); }
 }
 
-// ── Shared materials ─────────────────────────────────────────────────────────
-const MAT = {};
-const mkMat = (hex) => new THREE.MeshLambertMaterial({ color: hex });
+// ── Shared materials (explicit cache, Safari-compatible) ─────────────────────
+const _mc = new Map();
+function mat(hex) {
+  if (!_mc.has(hex)) _mc.set(hex, new THREE.MeshLambertMaterial({ color: hex }));
+  return _mc.get(hex);
+}
 const M = {
-  white:  () => MAT.white  ??= mkMat(0xf5f5f5),
-  cream:  () => MAT.cream  ??= mkMat(0xf0e8d0),
-  tan:    () => MAT.tan    ??= mkMat(0xc8a070),
-  brown:  () => MAT.brown  ??= mkMat(0x7a4e18),
-  grey:   () => MAT.grey   ??= mkMat(0x888888),
-  red:    () => MAT.red    ??= mkMat(0xd03020),
-  blue:   () => MAT.blue   ??= mkMat(0x3a90c8),
-  yellow: () => MAT.yellow ??= mkMat(0xf0c000),
-  black:  () => MAT.black  ??= mkMat(0x222222),
+  white:  () => mat(0xf5f5f5),
+  cream:  () => mat(0xf0e8d0),
+  tan:    () => mat(0xc8a070),
+  brown:  () => mat(0x7a4e18),
+  grey:   () => mat(0x888888),
+  red:    () => mat(0xd03020),
+  blue:   () => mat(0x3a90c8),
+  yellow: () => mat(0xf0c000),
+  black:  () => mat(0x222222),
 };
 const B = (w,h,d,m) => new THREE.Mesh(new THREE.BoxGeometry(w*VS,h*VS,d*VS), m());
 

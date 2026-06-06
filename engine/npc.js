@@ -20,14 +20,25 @@ function getScheduleEntry(schedule, hour) {
   return { area: schedule[0][2], activity: schedule[0][3] };
 }
 
-// ─── Shared body materials (cached) ──────────────────────────────────────────
+// ── Shared body materials (lazy singletons, no ??= for Safari compat) ────────
 const _matCache = new Map();
 function mat(hex) {
   if (!_matCache.has(hex)) _matCache.set(hex, new THREE.MeshLambertMaterial({ color: hex }));
   return _matCache.get(hex);
 }
 
-// ─── NPC ─────────────────────────────────────────────────────────────────────
+// Convenience shortcuts (called as M.white() etc)
+const M = {
+  white:  () => mat(0xf5f5f5),
+  cream:  () => mat(0xf0e8d0),
+  tan:    () => mat(0xc8a070),
+  brown:  () => mat(0x7a4e18),
+  grey:   () => mat(0x888888),
+  red:    () => mat(0xd03020),
+  blue:   () => mat(0x3a90c8),
+  yellow: () => mat(0xf0c000),
+  black:  () => mat(0x222222),
+};
 const LABEL_DIST = 16; // VS units — show label within this distance
 
 export class NPC {
@@ -126,7 +137,9 @@ export class NPC {
     const ctx = this._labelCtx, w = 256, h = 72;
     ctx.clearRect(0,0,w,h);
     ctx.fillStyle = 'rgba(0,0,0,0.55)';
-    ctx.beginPath(); ctx.roundRect?ctx.roundRect(0,0,w,h,12):ctx.rect(0,0,w,h); ctx.fill();
+    ctx.beginPath();
+    ctx.rect(0, 0, w, h);
+    ctx.fill();
     ctx.font = 'bold 16px Georgia'; ctx.fillStyle = '#fff'; ctx.textAlign = 'center';
     ctx.fillText(`${name}`, w/2, 22);
     ctx.font = '13px Georgia'; ctx.fillStyle = 'rgba(255,255,255,0.7)';
