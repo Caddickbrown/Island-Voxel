@@ -120,22 +120,25 @@
       return new Promise(r => setTimeout(() => { fn(); lfill.style.width = pct+'%'; r(); }, 16));
     }
 
+    // ── Module-scope game objects (assigned during boot, used by loop) ────────
+    let renderer, world, input, entities, npcMgr, loader, water, dayNight, player;
+
     // ── Boot ──────────────────────────────────────────────────────────────────
     const canvas = document.getElementById('c');
 
     setStatus('creating renderer…', 5);
-    const renderer  = new Renderer(canvas);
-    const world     = new World();
-    const input     = new Input(canvas);
-    const entities  = new EntityManager();
-    const npcMgr    = new NPCManager(renderer.scene, world, AREAS);
+    renderer  = new Renderer(canvas);
+    world     = new World();
+    input     = new Input(canvas);
+    entities  = new EntityManager();
+    npcMgr    = new NPCManager(renderer.scene, world, AREAS);
 
     setStatus('generating terrain…', 10);
     await defer(() => {}, 10);
 
     // Preload spawn area synchronously
     setStatus('loading spawn chunks…', 15);
-    const loader = new ChunkLoader(world, renderer);
+    loader = new ChunkLoader(world, renderer);
     await defer(() => loader.preloadSync(CX, CZ, 4), 40);
 
     // Populate island features
@@ -149,13 +152,13 @@
 
     // Water & sky
     setStatus('initialising sky…', 82);
-    const water   = new Water(renderer.scene, 640, SEA_LEVEL, VS);
+    water   = new Water(renderer.scene, 640, SEA_LEVEL, VS);
     water.setCenter(CX * VS, CZ * VS);
-    const dayNight = new DayNight(renderer, water, CX * VS, CZ * VS);
+    dayNight = new DayNight(renderer, water, CX * VS, CZ * VS);
 
     // Player
     setStatus('spawning player…', 88);
-    const player = new Player(world, renderer, input);
+    player = new Player(world, renderer, input);
     player.spawnAt(CX, CZ);
 
     // Lantern lights at key spots
