@@ -153,8 +153,11 @@ export class Player {
 
     // Third-person camera
     const camX = this.position.x - Math.sin(this.yaw) * Math.cos(this.pitch) * CAM_DIST;
-    const camY = this.position.y + P_HEIGHT + CAM_HI + Math.sin(this.pitch) * CAM_DIST;
+    let   camY = this.position.y + P_HEIGHT + CAM_HI + Math.sin(this.pitch) * CAM_DIST;
     const camZ = this.position.z - Math.cos(this.yaw) * Math.cos(this.pitch) * CAM_DIST;
+    // Keep the camera above the terrain so it never clips into hills
+    const camSurf = (this._world.getSurfaceY(Math.round(camX/VS), Math.round(camZ/VS)) + 1.5) * VS;
+    if (camY < camSurf) camY = camSurf;
     this._camTarget.set(camX, camY, camZ);
     this._camera.position.lerp(this._camTarget, DAMP + dt * 3);
     this._camera.lookAt(

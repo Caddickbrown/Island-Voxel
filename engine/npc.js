@@ -110,6 +110,7 @@ export class NPC {
     this._walkPhase   = Math.random() * Math.PI * 2;
     this._idleTimer   = 0;
     this._dialogueIdx = 0;
+    this._labelActivity = null; // last activity drawn on the label
   }
 
   _darken(hex, f) {
@@ -176,8 +177,8 @@ export class NPC {
     this._currentArea = areaKey;
   }
 
-  update(dt, now, playerPos) {
-    const hour = getSimTime();
+  update(dt, now, playerPos, hour) {
+    if (hour === undefined) hour = getSimTime();
     const entry = getScheduleEntry(this.schedule, hour);
 
     // Update schedule destination
@@ -227,11 +228,12 @@ export class NPC {
     if (playerPos) {
       const pdx = this.group.position.x - playerPos.x;
       const pdz = this.group.position.z - playerPos.z;
-      const pdist = Math.sqrt(pdx*pdx+pdz*pdz);
-      this._label.visible = pdist < LABEL_DIST * VS;
-      if (this._label.visible) {
+      const maxD = LABEL_DIST * VS;
+      this._label.visible = pdx*pdx + pdz*pdz < maxD*maxD;
+      // Redraw the canvas + re-upload the texture only when the text changes
+      if (this._label.visible && entry.activity !== this._labelActivity) {
+        this._labelActivity = entry.activity;
         this._drawLabel(this.name, this.job, entry.activity);
-        // Face label toward player (billboard already via Sprite)
       }
     }
   }
@@ -284,13 +286,15 @@ export class NPCManager {
     return npc;
   }
 
-  update(dt, now, playerPos) {
-    tickSimTime(dt);
-    for (const npc of this.npcs) npc.update(dt, now, playerPos);
+  // hour (optional, 0–24): drive schedules from the day/night clock so NPC
+  // routines and the HUD clock agree; falls back to the internal sim clock.
+  update(dt, now, playerPos, hour) {
+    if (hour === undefined) { tickSimTime(dt); hour = getSimTime(); }
+    for (const npc of this.npcs) npc.update(dt, now, playerPos, hour);
   }
 
   // Get nearest NPC within interaction range
-  getNearby(playerPos, range = 3 * VS) {
+  getNearby(playerPos, range = 4.5 * VS) {
     let closest = null, closestDist = range;
     for (const npc of this.npcs) {
       const dx = npc.group.position.x - playerPos.x;

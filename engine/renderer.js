@@ -1,14 +1,14 @@
-// engine/renderer.js — Three.js scene manager with chunk mesh lifecycle + frustum culling
+// engine/renderer.js — Three.js scene manager with chunk mesh lifecycle
 import * as THREE from 'three';
 import { VS } from './world.js';
+
+const LANTERN_POOL = 6; // fixed light count → shaders compile once, never again
 
 export class Renderer {
   constructor(canvas) {
     this.canvas = canvas;
 
-    this.renderer = new THREE.WebGLRenderer({
-      canvas, antialias: true, logarithmicDepthBuffer: true,
-    });
+    this.renderer = new THREE.WebGLRenderer({ canvas, antialias: true });
     this.renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
     this.renderer.setSize(innerWidth, innerHeight);
     this.renderer.toneMapping = THREE.ACESFilmicToneMapping;
@@ -36,9 +36,11 @@ export class Renderer {
     this.sun.shadow.mapSize.set(2048, 2048);
     this.sun.shadow.camera.near = 0.5;
     this.sun.shadow.camera.far = 600;
+    this.sun.shadow.bias = -0.0004;
     const sc = 80;
     Object.assign(this.sun.shadow.camera, { left:-sc, right:sc, top:sc, bottom:-sc });
     this.scene.add(this.sun);
+    this.scene.add(this.sun.target); // target must be in the scene for shadows to track it
 
     this.ambient = new THREE.AmbientLight(0x8ab4d4, 0.5);
     this.scene.add(this.ambient);
@@ -48,7 +50,7 @@ export class Renderer {
     // Sky dome
     this.sky = new THREE.Mesh(
       new THREE.SphereGeometry(580, 24, 12),
-      new THREE.MeshBasicMaterial({ color: 0x87ceeb, side: THREE.BackSide }),
+      new THREE.MeshBasicMaterial({ color: 0x87ceeb, side: THREE.BackSide, fog: false }),
     );
     this.scene.add(this.sky);
 
@@ -63,18 +65,24 @@ export class Renderer {
     this.stars = new THREE.Points(sg, new THREE.PointsMaterial({
       color: 0xffffff, size: 1.2, transparent: true, opacity: 0,
     }));
+    this.stars.visible = false;
     this.scene.add(this.stars);
 
-    // Lantern lights (point lights, managed by DayNight)
-    this.lanternLights = [];
+    // Lanterns: positions are stored as spots; a small pool of PointLights is
+    // assigned to the nearest spots at night. One light per lantern would put
+    // dozens of point lights in every shader (and can exceed mobile uniform
+    // limits) — a fixed pool keeps the light count constant.
+    this.lanternSpots = [];
+    this._lanternPool = [];
+    for (let i = 0; i < LANTERN_POOL; i++) {
+      const pl = new THREE.PointLight(0xffaa44, 0, 18, 2);
+      this.scene.add(pl);
+      this._lanternPool.push(pl);
+    }
+    this._lanternFocus = new THREE.Vector3(Infinity, 0, Infinity);
 
     // Chunk meshes: key → { opaque: THREE.Mesh, glass: THREE.Mesh, lod }
     this.chunkMeshes = new Map();
-
-    // Frustum helper
-    this._frustum = new THREE.Frustum();
-    this._projScreen = new THREE.Matrix4();
-    this._bbox = new THREE.Box3();
 
     window.addEventListener('resize', () => {
       this.camera.aspect = innerWidth / innerHeight;
@@ -94,7 +102,7 @@ export class Renderer {
     geo.setAttribute('normal',   new THREE.Float32BufferAttribute(normals, 3));
     geo.setAttribute('color',    new THREE.Float32BufferAttribute(colors, 3));
     geo.setIndex(new THREE.Uint32BufferAttribute(indices, 1));
-    geo.computeBoundingSphere();
+    geo.computeBoundingSphere(); // three.js frustum-culls per mesh using this
     return geo;
   }
 
@@ -106,12 +114,14 @@ export class Renderer {
     if (oGeo) {
       const m = new THREE.Mesh(oGeo, this.solidMat);
       m.castShadow = true; m.receiveShadow = true;
+      m.matrixAutoUpdate = false; // chunk meshes never move
       this.scene.add(m);
       entry.opaque = m;
     }
     const gGeo = this._makeGeo(glass);
     if (gGeo) {
       const m = new THREE.Mesh(gGeo, this.glassMat);
+      m.matrixAutoUpdate = false;
       this.scene.add(m);
       entry.glass = m;
     }
@@ -127,37 +137,34 @@ export class Renderer {
     this.chunkMeshes.delete(key);
   }
 
-  // Frustum cull: hide chunks whose bounding sphere is outside the camera frustum
-  frustumCull() {
-    this._projScreen.multiplyMatrices(
-      this.camera.projectionMatrix,
-      this.camera.matrixWorldInverse,
-    );
-    this._frustum.setFromProjectionMatrix(this._projScreen);
+  addLanternLight(wx, wy, wz) {
+    this.lanternSpots.push(new THREE.Vector3(wx * VS, wy * VS, wz * VS));
+  }
 
-    for (const [, entry] of this.chunkMeshes) {
-      for (const mesh of [entry.opaque, entry.glass]) {
-        if (!mesh) continue;
-        mesh.visible = this._frustum.intersectsSphere(mesh.geometry.boundingSphere) ||
-                       this._frustum.intersectsBox(
-                         this._bbox.setFromObject(mesh)
-                       );
+  // Assign the pooled lights to the nearest lantern spots around `focus`.
+  updateLanterns(focus, intensity) {
+    if (intensity <= 0.01) {
+      for (const pl of this._lanternPool) pl.intensity = 0;
+      return;
+    }
+    // Re-pick nearest spots only when the player has moved a few units
+    if (focus.distanceToSquared(this._lanternFocus) > 9) {
+      this._lanternFocus.copy(focus);
+      const sorted = this.lanternSpots
+        .map(p => ({ p, d: p.distanceToSquared(focus) }))
+        .sort((a,b) => a.d - b.d);
+      for (let i = 0; i < this._lanternPool.length; i++) {
+        if (sorted[i]) this._lanternPool[i].position.copy(sorted[i].p);
       }
     }
+    for (const pl of this._lanternPool) pl.intensity = intensity;
   }
 
-  addLanternLight(wx, wy, wz) {
-    const pl = new THREE.PointLight(0xffaa44, 0, 0);
-    pl.position.set(wx * VS, wy * VS, wz * VS);
-    this.scene.add(pl);
-    this.lanternLights.push(pl);
-    return pl;
-  }
-
-  setSun(pos, color, intensity) {
+  setSun(pos, color, intensity, focus) {
     this.sun.position.copy(pos);
     this.sun.color.set(color);
     this.sun.intensity = intensity;
+    if (focus) this.sun.target.position.copy(focus); // keep shadows centred on the player
   }
 
   setAmbient(intensity) {
@@ -173,6 +180,9 @@ export class Renderer {
   }
 
   render() {
+    // Sky dome and stars follow the camera so they never get clipped/parallaxed
+    this.sky.position.copy(this.camera.position);
+    this.stars.position.copy(this.camera.position);
     this.renderer.render(this.scene, this.camera);
   }
 }
