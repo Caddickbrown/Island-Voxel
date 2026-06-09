@@ -423,7 +423,3 @@ export function populateWorld(world) {
 
   return interactables;
 }
-
-// Expose VT.STONE_DARK — added to VT in world.js
-const VT_EXTRA = { STONE_DARK: 52 };
-Object.assign(VT, VT_EXTRA);

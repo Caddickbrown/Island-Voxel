@@ -7,8 +7,12 @@ export class Input {
     // Look deltas (consumed per frame)
     this._ldx = 0; this._ldy = 0;
     // Action states
-    this._down    = new Set();
-    this._pressed = new Set(); // set for one frame only
+    this._down        = new Set();
+    this._pressed     = new Set(); // readable for one frame via wasPressed()
+    // Events fire between animation frames, so presses are buffered here and
+    // promoted to _pressed at the start of the next update() — writing them
+    // straight into _pressed would get cleared before anyone could read them.
+    this._pressedNext = new Set();
     this.pointerLocked = false;
     this.mouseSensitivity = 0.0025;
 
@@ -33,7 +37,7 @@ export class Input {
 
     window.addEventListener('keydown', e => {
       const a = map[e.code];
-      if (a) { if(!this._down.has(a)) this._pressed.add(a); this._down.add(a); }
+      if (a) { if(!this._down.has(a)) this._pressedNext.add(a); this._down.add(a); }
       if (e.code === 'Tab') e.preventDefault();
     });
     window.addEventListener('keyup', e => {
@@ -106,6 +110,8 @@ export class Input {
   }
 
   _drawVJ() {
+    if (!this._vjActive && !this._vjWasActive) return; // nothing to draw or clear
+    this._vjWasActive = this._vjActive;
     const ctx = this._vjCtx, c = this._vjCanvas;
     ctx.clearRect(0, 0, c.width, c.height);
     if (!this._vjActive) return;
@@ -122,6 +128,8 @@ export class Input {
 
   update() {
     this._pressed.clear();
+    for (const a of this._pressedNext) this._pressed.add(a);
+    this._pressedNext.clear();
 
     // Keyboard movement
     let kx = 0, kz = 0;
@@ -166,6 +174,9 @@ export class Input {
     this._ldx = 0; this._ldy = 0;
     return { dx, dy };
   }
+
+  // Trigger an action from external UI (e.g. the on-screen interact button)
+  press(action)     { this._pressedNext.add(action); }
 
   isDown(action)    { return this._down.has(action); }
   wasPressed(action){ return this._pressed.has(action); }

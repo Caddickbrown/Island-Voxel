@@ -21,7 +21,7 @@ export const VT = Object.freeze({
   CHIMNEY:42, FENCE:43, METAL:44, LANTERN:45,
   FLOWER_R:46, FLOWER_Y:47, FLOWER_P:48, FLOWER_W:49,
   MUSHROOM:50, REED:51, STONE_DARK:52, WATER_SHALLOW:53,
-  SOLAR_FRAME:54, STAINED_GLASS:55,
+  SOLAR_FRAME:54, STAINED_GLASS:55, WINDMILL:56,
 });
 
 // String → int helper
@@ -31,45 +31,105 @@ export function vt(name) {
   return v;
 }
 
+const C3 = CHUNK_SIZE ** 3;
+
+// Shared zeroed chunk for all-air regions — avoids allocating 32KB per sky chunk.
+// Copied-on-write in setVoxel.
+const EMPTY_CHUNK = new Uint8Array(C3);
+
+// Biome → voxel id by depth (index 0..3 = depth, index 4 = anything deeper)
+const _layerCache = new Map();
+function layersFor(biome) {
+  let l = _layerCache.get(biome);
+  if (!l) {
+    l = new Uint8Array(5);
+    for (let d = 0; d < 5; d++) {
+      const name = getSurfaceVoxel(biome, d === 4 ? 8 : d);
+      l[d] = VT[name] !== undefined ? VT[name] : VT.STONE;
+    }
+    _layerCache.set(biome, l);
+  }
+  return l;
+}
+
 export class World {
   constructor() {
-    this.chunks   = new Map(); // "cx,cy,cz" → Uint8Array(32³)
+    this.chunks     = new Map(); // "cx,cy,cz" → Uint8Array(32³)
     this._surfCache = new Map(); // "wx,wz" → surfaceY
+    this._colCache  = new Map(); // "ccx,ccz" → per-column heights/biomes for a chunk column
+    this.dirtyMesh  = new Set(); // chunk keys whose mesh is stale after setVoxel
   }
 
   _ck(cx,cy,cz) { return `${cx},${cy},${cz}`; }
 
-  getChunk(cx,cy,cz) {
-    const k = this._ck(cx,cy,cz);
-    if (!this.chunks.has(k)) {
-      const data = new Uint8Array(CHUNK_SIZE**3);
-      this.chunks.set(k, data);
-      this._gen(data, cx, cy, cz);
-    }
-    return this.chunks.get(k);
-  }
-
-  _gen(data, cx, cy, cz) {
+  // Per-chunk-column terrain data, computed once and shared by all 6 Y slabs.
+  _columns(ccx, ccz) {
+    const k = `${ccx},${ccz}`;
+    let col = this._colCache.get(k);
+    if (col) return col;
     const C = CHUNK_SIZE;
+    const ty     = new Int16Array(C*C);
+    const layers = new Array(C*C);
+    const water  = new Uint8Array(C*C);
+    let maxTy = 0;
     for (let lz=0; lz<C; lz++) for (let lx=0; lx<C; lx++) {
-      const wx = cx*C+lx, wz = cz*C+lz;
+      const wx = ccx*C+lx, wz = ccz*C+lz;
       const rwx = wx-CX, rwz = wz-CZ; // relative to island centre
       const h = islandHeight(rwx, rwz, S);
-      const ty = Math.floor(SEA_LEVEL + h);
+      const t = Math.floor(SEA_LEVEL + h);
+      const i = lx + lz*C;
+      ty[i]     = t;
+      water[i]  = h <= 0.2 ? 1 : 0;
+      layers[i] = layersFor(getBiome(rwx, rwz, h, S));
+      if (t > maxTy) maxTy = t;
+    }
+    col = { ty, layers, water, maxTy };
+    if (this._colCache.size > 4096) this._colCache.clear();
+    this._colCache.set(k, col);
+    return col;
+  }
 
-      for (let ly=0; ly<C; ly++) {
-        const wy = cy*C+ly;
-        const i = lx + lz*C + ly*C*C;
-        if (wy > ty) {
-      data[i] = (wy <= SEA_LEVEL && h <= 0.2) ? VT.WATER : VT.AIR;
-        } else {
-          const depth = ty - wy;
-          const biome = getBiome(rwx, rwz, h, S);
-          const name  = getSurfaceVoxel(biome, depth);
-          data[i] = VT[name] !== undefined ? VT[name] : VT.STONE;
+  getChunk(cx,cy,cz) {
+    const k = this._ck(cx,cy,cz);
+    let c = this.chunks.get(k);
+    if (c === undefined) {
+      const data = new Uint8Array(C3);
+      c = this._gen(data, cx, cy, cz) ? data : EMPTY_CHUNK;
+      this.chunks.set(k, c);
+    }
+    return c;
+  }
+
+  isChunkEmpty(cx,cy,cz) {
+    return this.getChunk(cx,cy,cz) === EMPTY_CHUNK;
+  }
+
+  // Returns true if the chunk contains any non-air voxel
+  _gen(data, cx, cy, cz) {
+    const C = CHUNK_SIZE;
+    const col = this._columns(cx, cz);
+    const yBase = cy*C, yTopSlab = yBase + C - 1;
+    if (yBase > col.maxTy && yBase > SEA_LEVEL) return false; // pure sky
+    let solid = false;
+
+    for (let lz=0; lz<C; lz++) for (let lx=0; lx<C; lx++) {
+      const ci = lx + lz*C;
+      const t = col.ty[ci], layers = col.layers[ci];
+      const top = Math.min(t, yTopSlab);
+      for (let wy=yBase; wy<=top; wy++) {
+        const depth = t - wy;
+        data[lx + lz*C + (wy-yBase)*C*C] = layers[depth > 4 ? 4 : depth];
+        solid = true;
+      }
+      if (col.water[ci]) { // shallow water fills above terrain up to sea level
+        const wTop = Math.min(SEA_LEVEL, yTopSlab);
+        for (let wy=Math.max(yBase, t+1); wy<=wTop; wy++) {
+          data[lx + lz*C + (wy-yBase)*C*C] = VT.WATER;
+          solid = true;
         }
       }
     }
+    return solid;
   }
 
   getVoxel(wx,wy,wz) {
@@ -84,13 +144,25 @@ export class World {
   setVoxel(wx,wy,wz,type) {
     const C = CHUNK_SIZE;
     const cx=Math.floor(wx/C), cy=Math.floor(wy/C), cz=Math.floor(wz/C);
-    // Ensure chunk exists
-    const chunk = this.getChunk(cx,cy,cz);
+    const k = this._ck(cx,cy,cz);
+    let chunk = this.getChunk(cx,cy,cz);
+    if (chunk === EMPTY_CHUNK) { // copy-on-write for shared air chunk
+      chunk = new Uint8Array(C3);
+      this.chunks.set(k, chunk);
+    }
     const lx=wx-cx*C, ly=wy-cy*C, lz=wz-cz*C;
     chunk[lx + lz*C + ly*C*C] = type;
     this._surfCache.delete(`${wx},${wz}`);
-    // Return chunk key so renderer can mark it dirty
-    return this._ck(cx,cy,cz);
+
+    // Mark this chunk (and boundary neighbours, for face culling/AO) stale
+    this.dirtyMesh.add(k);
+    if (lx===0)   this.dirtyMesh.add(this._ck(cx-1,cy,cz));
+    if (lx===C-1) this.dirtyMesh.add(this._ck(cx+1,cy,cz));
+    if (ly===0)   this.dirtyMesh.add(this._ck(cx,cy-1,cz));
+    if (ly===C-1) this.dirtyMesh.add(this._ck(cx,cy+1,cz));
+    if (lz===0)   this.dirtyMesh.add(this._ck(cx,cy,cz-1));
+    if (lz===C-1) this.dirtyMesh.add(this._ck(cx,cy,cz+1));
+    return k;
   }
 
   isSolid(wx,wy,wz) {
@@ -102,9 +174,15 @@ export class World {
 
   getSurfaceY(wx,wz) {
     const k = `${wx},${wz}`;
-    if (this._surfCache.has(k)) return this._surfCache.get(k);
-    for (let wy=159; wy>=0; wy--) {
-      if (this.isSolid(wx,wy,wz)) { this._surfCache.set(k,wy); return wy; }
+    const cached = this._surfCache.get(k);
+    if (cached !== undefined) return cached;
+    const C = CHUNK_SIZE;
+    const ccx = Math.floor(wx/C), ccz = Math.floor(wz/C);
+    for (let cy=5; cy>=0; cy--) { // scan full world height, skipping air chunks
+      if (this.isChunkEmpty(ccx,cy,ccz)) continue;
+      for (let wy=cy*C+C-1; wy>=cy*C; wy--) {
+        if (this.isSolid(wx,wy,wz)) { this._surfCache.set(k,wy); return wy; }
+      }
     }
     this._surfCache.set(k, SEA_LEVEL);
     return SEA_LEVEL;
@@ -125,7 +203,9 @@ export class World {
     return out;
   }
 
-  // Get the chunk data and its 6 immediate neighbours (for seam AO)
+  // Get the chunk data and its neighbours (for seam culling + AO).
+  // Neighbours are generated on demand so chunk borders mesh correctly;
+  // all-air neighbours are returned as null (treated as air by the mesher).
   getChunkWithNeighbours(cx,cy,cz) {
     const data = this.getChunk(cx,cy,cz);
     const nbrs = {};
@@ -134,7 +214,8 @@ export class World {
       [1,0,1],[1,0,-1],[-1,0,1],[-1,0,-1] // diagonals for AO corners
     ]) {
       const k = `${dx},${dy},${dz}`;
-      if (!nbrs[k]) nbrs[k] = this.chunks.get(this._ck(cx+dx,cy+dy,cz+dz)) || null;
+      const nd = this.getChunk(cx+dx, cy+dy, cz+dz);
+      nbrs[k] = nd === EMPTY_CHUNK ? null : nd;
     }
     return { data, nbrs };
   }

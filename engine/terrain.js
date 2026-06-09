@@ -118,25 +118,33 @@ export function getZone(lwx, lwz) {
 export function islandHeight(wx, wz, S=4) {
   const lwx=wx/S, lwz=wz/S;
   const d=dist2(lwx,lwz,0,0), a=Math.atan2(lwz,lwx);
+  const fs = 1/S;
+
+  // ── Mountain (NW headland) ────────────────────────────────────────────────
+  // Checked BEFORE the coastline falloff: the mountain centre sits beyond the
+  // coast radius at this angle, so testing ef first sank the whole massif
+  // (and 'The Summit') into the sea. Peak capped so summit (sea level 36 +
+  // cone + roughness) stays below the world ceiling of 192 voxels — the old
+  // S*52 cone clipped flat at the top.
+  const mDist = dist2(lwx,lwz,MOUNTAIN_X,MOUNTAIN_Z);
+  let mountainH = null, mBlend = 1;
+  if (mDist < 30) {
+    const mf = Math.max(0, 1-mDist/30);
+    const cone  = S*33 * mf**1.4;
+    const rough = fbm(wx*fs*.3+8.4,wz*fs*.3+2.6,4) * S*5 * mf;
+    const feet  = S*5  * mf**0.4;
+    mountainH = Math.max(feet, cone+rough);
+    if (mDist < 26) return mountainH;
+    mBlend = (30 - mDist) / 4; // outer rim: blend into surrounding terrain
+  }
 
   // Organic coastline
   const r = 62 + 14*Math.sin(a*3+.22) + 8*Math.sin(a*7+1.38)
               +  4*Math.sin(a*11-.82) + 2*Math.sin(a*17+2.1) + Math.sin(a*23-1.4);
   const ef = Math.max(0, 1-d/r);
-  if (ef<=0) return 0;
+  if (ef<=0) return mountainH !== null ? Math.max(0, mountainH * mBlend) : 0;
   const fade = Math.min(1, ef*5);
-  const fs = 1/S;
   const zone = getZone(lwx, lwz);
-
-  // ── Mountain ─────────────────────────────────────────────────────────────
-  const mDist = dist2(lwx,lwz,MOUNTAIN_X,MOUNTAIN_Z);
-  if (mDist < 30) {
-    const mf = Math.max(0, 1-mDist/30);
-    const cone  = S*52 * mf**1.4;
-    const rough = fbm(wx*fs*.3+8.4,wz*fs*.3+2.6,4) * S*5 * mf;
-    const feet  = S*5  * Math.max(0, 1-mDist/30)**0.4;
-    return Math.max(feet, cone+rough);
-  }
 
   // ── Zone height profiles ──────────────────────────────────────────────────
   let h;
@@ -210,6 +218,8 @@ export function islandHeight(wx, wz, S=4) {
   const dd = dist2(lwx,lwz,0,62);
   if (dd<12) h = Math.max(h*(dd/12), S*1.2*Math.max(0,1-dd/12));
 
+  if (mountainH !== null) h = mountainH * mBlend + h * (1 - mBlend);
+
   return Math.max(0, h);
 }
 
@@ -222,9 +232,10 @@ export function getBiome(wx, wz, height, S=4) {
 
   const mDist = dist2(lwx,lwz,MOUNTAIN_X,MOUNTAIN_Z);
   if (mDist<30) {
-    if (height>S*48) return 'snow';
-    if (height>S*34) return 'mountain_rock';
-    if (height>S*18) return 'mountain_grass';
+    // Thresholds scaled to the S*33 peak so the summit actually gets snow
+    if (height>S*26) return 'snow';
+    if (height>S*18) return 'mountain_rock';
+    if (height>S*10) return 'mountain_grass';
     return 'mountain_base';
   }
 
