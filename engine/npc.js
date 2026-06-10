@@ -146,7 +146,9 @@ export class NPC {
     ctx.font = '13px Georgia'; ctx.fillStyle = 'rgba(255,255,255,0.7)';
     ctx.fillText(job, w/2, 42);
     if (activity) { ctx.font = '11px monospace'; ctx.fillStyle = 'rgba(255,255,200,0.8)'; ctx.fillText(activity, w/2, 62); }
-    this._labelTex.needsUpdate = true;
+    // _labelTex doesn't exist yet on the initial draw from _makeLabel; the
+    // CanvasTexture created right after picks up the canvas content itself.
+    if (this._labelTex) this._labelTex.needsUpdate = true;
   }
 
   _addAccessory(job, skin) {
