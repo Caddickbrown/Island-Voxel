@@ -38,6 +38,15 @@
       background:rgba(255,255,255,.18); border:2px solid rgba(255,255,255,.45);
       color:#fff; font-size:18px; display:flex; align-items:center; justify-content:center;
       cursor:pointer; user-select:none; }
+    #jump { position:absolute; bottom:88px; right:22px; pointer-events:auto;
+      width:60px; height:60px; border-radius:50%; display:none;
+      background:rgba(255,255,255,.18); border:2px solid rgba(255,255,255,.45);
+      color:#fff; font-size:24px; align-items:center; justify-content:center;
+      cursor:pointer; user-select:none; -webkit-user-select:none; touch-action:manipulation; }
+    body.touch #jump { display:flex; }
+    #hint .touch-hint { display:none; }
+    body.touch #hint .kbd-hint { display:none; }
+    body.touch #hint .touch-hint { display:inline; }
     #dialogue {
       position:absolute; bottom:80px; left:50%; transform:translateX(-50%);
       max-width:480px; width:90%;
@@ -75,8 +84,9 @@
     <div id="area"></div>
     <div id="stats"></div>
     <div id="interact" title="Interact (E)">E</div>
+    <div id="jump" title="Jump">↑</div>
     <div id="prompt"></div>
-    <div id="hint">click to look around · WASD move · Shift run · Space jump · <b style="color:#ffd700">E</b> talk</div>
+    <div id="hint"><span class="kbd-hint">click to look around · WASD move · Shift run · Space jump · <b style="color:#ffd700">E</b> talk</span><span class="touch-hint">left side move · right side look · <b style="color:#ffd700">↑</b> jump · <b style="color:#ffd700">E</b> talk</span></div>
     <div id="dialogue">
       <div class="dname" id="d-name"></div>
       <div class="djob"  id="d-job"></div>
@@ -196,6 +206,15 @@
 
     // Interact button (buffered so the press survives until the next frame)
     document.getElementById('interact').addEventListener('click', () => input.press('interact'));
+
+    // Jump button — touch devices only (desktop has Space). touchstart fires
+    // immediately, without click delay, and mustn't also grab the look-drag.
+    const jumpBtn = document.getElementById('jump');
+    if ('ontouchstart' in window || navigator.maxTouchPoints > 0) {
+      document.body.classList.add('touch');
+      jumpBtn.addEventListener('touchstart', e => { e.preventDefault(); input.press('jump'); }, { passive: false });
+    }
+    jumpBtn.addEventListener('click', () => input.press('jump'));
 
     // Build area → world position map for NPC navigation
     setStatus('placing NPCs…', 94);
