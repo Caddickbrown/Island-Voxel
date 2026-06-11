@@ -13,8 +13,11 @@ export class Input {
     // promoted to _pressed at the start of the next update() — writing them
     // straight into _pressed would get cleared before anyone could read them.
     this._pressedNext = new Set();
+    this._gpDown      = new Set(); // actions currently held via gamepad buttons
     this.pointerLocked = false;
     this.mouseSensitivity = 0.0025;
+    // Invert the look Y axis (applies to mouse, touch drag and gamepad alike)
+    this.invertY = false;
 
     // Virtual joystick state
     this._vjActive = false;
@@ -46,7 +49,9 @@ export class Input {
   }
 
   _bindMouse(canvas) {
-    canvas.addEventListener('click', () => canvas.requestPointerLock());
+    // requestPointerLock can reject (e.g. Chrome's cooldown right after an
+    // Esc-exit) — swallow it, the next click will lock
+    canvas.addEventListener('click', () => { const p = canvas.requestPointerLock(); if (p && p.catch) p.catch(() => {}); });
     document.addEventListener('pointerlockchange', () => {
       this.pointerLocked = document.pointerLockElement === canvas;
     });
@@ -154,10 +159,20 @@ export class Input {
       if (!gp) continue;
       gpx = gp.axes[0]; gpz = gp.axes[1];
       gplx = gp.axes[2]; gply = gp.axes[3];
-      if (gp.buttons[0] && gp.buttons[0].pressed && !this._down.has('jump')) { this._pressed.add('jump'); this._down.add('jump'); }
-      if (gp.buttons[0] && !gp.buttons[0].pressed) this._down.delete('jump');
-      if (gp.buttons[2] && gp.buttons[2].pressed && !this._down.has('interact')) { this._pressed.add('interact'); this._down.add('interact'); }
-      if (gp.buttons[2] && !gp.buttons[2].pressed) this._down.delete('interact');
+      // Standard mapping: A jump, X interact, Start pause, L3 sprint.
+      // Edge-tracked in _gpDown so releasing a pad button never clears an
+      // action a held keyboard key is also driving.
+      for (const [idx, action] of [[0,'jump'], [2,'interact'], [9,'pause'], [10,'sprint']]) {
+        const held = !!(gp.buttons[idx] && gp.buttons[idx].pressed);
+        if (held && !this._gpDown.has(action)) {
+          this._gpDown.add(action);
+          if (!this._down.has(action)) this._pressed.add(action);
+          this._down.add(action);
+        } else if (!held && this._gpDown.has(action)) {
+          this._gpDown.delete(action);
+          this._down.delete(action);
+        }
+      }
       break;
     }
     if (Math.abs(gplx) > 0.1) this._ldx += gplx * 0.04;
@@ -170,7 +185,7 @@ export class Input {
   }
 
   consumeLook() {
-    const dx = this._ldx, dy = this._ldy;
+    const dx = this._ldx, dy = this._ldy * (this.invertY ? -1 : 1);
     this._ldx = 0; this._ldy = 0;
     return { dx, dy };
   }

@@ -52,14 +52,16 @@ export function buildHumanoid({
   const legGeo = new THREE.BoxGeometry(.3*VS,.85*VS,.3*VS);
   const legL = new THREE.Mesh(legGeo, pants); legL.position.set(-.2*VS,.48*VS,0);
   const legR = new THREE.Mesh(legGeo, pants); legR.position.set( .2*VS,.48*VS,0);
-  // Feet
+  // Feet — parented to the legs so they swing with the stride instead of
+  // staying planted while the legs rotate (positions are leg-local)
   const footGeo = new THREE.BoxGeometry(.3*VS,.2*VS,.42*VS);
-  const footL = new THREE.Mesh(footGeo, shoe); footL.position.set(-.2*VS,.1*VS,.07*VS);
-  const footR = new THREE.Mesh(footGeo, shoe); footR.position.set( .2*VS,.1*VS,.07*VS);
+  const footL = new THREE.Mesh(footGeo, shoe); footL.position.set(0,-.38*VS,.07*VS);
+  const footR = new THREE.Mesh(footGeo, shoe); footR.position.set(0,-.38*VS,.07*VS);
+  legL.add(footL); legR.add(footR);
 
   const meshes = [head, hairM, body, armL, armR, legL, legR, footL, footR];
   if (castShadow) for (const m of meshes) m.castShadow = true;
-  group.add(...meshes);
+  group.add(head, hairM, body, armL, armR, legL, legR);
 
   return { group, parts: { head, hair: hairM, body, armL, armR, legL, legR, footL, footR } };
 }
@@ -67,11 +69,24 @@ export function buildHumanoid({
 const _ease = (k, dt) => 1 - Math.exp(-k * dt);
 const _approach = (mesh, target, f) => { mesh.rotation.x += (target - mesh.rotation.x) * f; };
 
+// Move torso/head/hair up or down together from their rest heights
+function _setBob(parts, anim, y) {
+  parts.body.position.y = anim.baseBodyY + y;
+  parts.head.position.y = anim.baseHeadY + y;
+  parts.hair.position.y = anim.baseHairY + y;
+}
+
 /**
  * Per-frame limb animation. `anim` is caller-owned mutable state:
- * { walkPhase: number, bob: number }. speed is horizontal world units/s.
+ * { walkPhase: number }. speed is horizontal world units/s.
  */
 export function animateHumanoid(parts, anim, dt, { speed = 0, grounded = true } = {}) {
+  if (anim.baseBodyY === undefined) {
+    anim.baseBodyY = parts.body.position.y;
+    anim.baseHeadY = parts.head.position.y;
+    anim.baseHairY = parts.hair.position.y;
+    anim.idleTime  = Math.random() * Math.PI * 2; // desync crowds
+  }
   if (!grounded) {
     // Airborne — arms swept back, legs split in a leap. Kept modest because the
     // limb boxes pivot at their centres, so big angles clip through the body.
@@ -80,6 +95,7 @@ export function animateHumanoid(parts, anim, dt, { speed = 0, grounded = true } 
     _approach(parts.armR, -0.9, f);
     _approach(parts.legL,  0.45, f);
     _approach(parts.legR, -0.25, f);
+    _setBob(parts, anim, 0);
     return;
   }
   if (speed > 0.05) {
@@ -90,12 +106,20 @@ export function animateHumanoid(parts, anim, dt, { speed = 0, grounded = true } 
     parts.armR.rotation.x = -swing;
     parts.legL.rotation.x = -swing * 0.8;
     parts.legR.rotation.x =  swing * 0.8;
+    // Torso bob — one dip per footfall (twice per stride), plus a slight lean
+    _setBob(parts, anim, Math.abs(Math.sin(anim.walkPhase)) * 0.05 * VS);
+    _approach(parts.body, 0.06, _ease(8, dt));
   } else {
-    // Settle back to rest
+    // Settle back to rest, then breathe — slow torso rise with a hint of
+    // arm sway so standing characters never look frozen
+    anim.idleTime += dt;
     const f = _ease(12, dt);
-    _approach(parts.armL, 0, f);
-    _approach(parts.armR, 0, f);
+    const breathe = Math.sin(anim.idleTime * 1.7);
+    _approach(parts.armL, breathe * 0.04, f);
+    _approach(parts.armR, breathe * 0.04, f);
     _approach(parts.legL, 0, f);
     _approach(parts.legR, 0, f);
+    _approach(parts.body, 0, f);
+    _setBob(parts, anim, breathe * 0.012 * VS);
   }
 }
