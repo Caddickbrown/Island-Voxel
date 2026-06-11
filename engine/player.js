@@ -1,6 +1,7 @@
 // engine/player.js — Third-person player controller
 import * as THREE from 'three';
 import { VS, SEA_LEVEL } from './world.js';
+import { buildHumanoid, animateHumanoid, mat, HUMANOID_HEIGHT } from './character.js';
 
 const GRAVITY   = -28 * VS;
 const JUMP_VEL  = 10  * VS;
@@ -11,7 +12,6 @@ const CAM_HI    = 3   * VS;
 const P_RADIUS  = 0.4 * VS;
 const P_HEIGHT  = 1.8 * VS;
 const STEP_UP   = 1.5 * VS; // max step height in world units
-const DAMP      = 0.12;     // camera follow damping
 
 export class Player {
   constructor(world, renderer, input) {
@@ -27,15 +27,27 @@ export class Player {
     this.pitch = 0.3;
     this.onGround = false;
 
-    // Visual — simple capsule placeholder (replaced with actual mesh later)
+    // Visual — blocky humanoid (shared builder with NPCs), scaled so the
+    // silhouette matches the physics capsule height
     this._mesh = new THREE.Group();
-    const body = new THREE.Mesh(
-      new THREE.CapsuleGeometry(P_RADIUS, P_HEIGHT - P_RADIUS*2, 4, 8),
-      new THREE.MeshLambertMaterial({ color: 0xffd700 }),
-    );
-    body.position.y = P_HEIGHT * 0.5;
-    this._mesh.add(body);
+    const { group: bodyGroup, parts } = buildHumanoid({
+      shirtColor: 0x2a9d8f,   // teal — distinct from every NPC outfit
+      hairColor:  0x4a2c12,
+      castShadow: true,
+    });
+    // Satchel across the back
+    const satchel = new THREE.Mesh(new THREE.BoxGeometry(.5*VS,.55*VS,.18*VS), mat(0x7a4e18));
+    satchel.position.set(0, 1.1*VS, -.31*VS);
+    satchel.castShadow = true;
+    bodyGroup.add(satchel);
+    bodyGroup.scale.setScalar(P_HEIGHT / HUMANOID_HEIGHT);
+    this._mesh.add(bodyGroup);
     renderer.scene.add(this._mesh);
+    this._parts = parts;
+    this._anim  = { walkPhase: 0 };
+    // Rendered Y is smoothed separately so voxel-quantized physics steps
+    // don't pop the mesh or the camera
+    this._visualY = 0;
 
     this._camTarget = new THREE.Vector3();
 
@@ -48,6 +60,7 @@ export class Player {
     const surfVox = this._world.getSurfaceY(Math.round(wx), Math.round(wz));
     this.position.set(wx * VS, (surfVox + 2) * VS, wz * VS);
     this.velocity.set(0, 0, 0);
+    this._visualY = this.position.y;
   }
 
   // Returns the voxel coord the player is looking at (for interaction)
@@ -68,6 +81,23 @@ export class Player {
 
   _isSolid(wx, wy, wz) {
     return this._world.isSolid(Math.floor(wx), Math.floor(wy), Math.floor(wz));
+  }
+
+  // World-Y of the walkable ground top at (wx, wz): scan from STEP_UP above the
+  // foot down a few voxels for the first solid voxel with two clear voxels
+  // above it, so canopies and awnings overhead never count as ground.
+  _groundY(wx, wz) {
+    const vx = Math.floor(wx / VS), vz = Math.floor(wz / VS);
+    const footVy = Math.floor(this.position.y / VS);
+    const maxUp = Math.ceil(STEP_UP / VS);
+    for (let vy = footVy + maxUp; vy >= footVy - 3; vy--) {
+      if (this._world.isSolid(vx, vy, vz) &&
+          !this._world.isSolid(vx, vy + 1, vz) &&
+          !this._world.isSolid(vx, vy + 2, vz)) {
+        return (vy + 1) * VS;
+      }
+    }
+    return null;
   }
 
   // Sweep-cast sphere collision — push out of solid voxels
@@ -105,15 +135,24 @@ export class Player {
     this.yaw   -= ldx;
     this.pitch  = Math.max(-0.5, Math.min(0.8, this.pitch - ldy));
 
-    // Movement direction (relative to yaw)
+    const wasGrounded = this.onGround;
+
+    // Movement — camera-relative. The camera looks along +(sin yaw, cos yaw),
+    // so screen-right is (-cos yaw, sin yaw); nz is -1 when pushing forward.
     const speed = BASE_SPD * (input.isDown('sprint') ? SPRINT : 1);
     const mx = input.moveX, mz = input.moveZ;
     const len = Math.sqrt(mx*mx + mz*mz);
     if (len > 0.01) {
       const nx = mx / len, nz = mz / len;
-      this.velocity.x = (Math.sin(this.yaw)*nz + Math.cos(this.yaw)*nx) * speed;
-      this.velocity.z = (Math.cos(this.yaw)*nz - Math.sin(this.yaw)*nx) * speed;
-      this._mesh.rotation.y = -this.yaw + Math.atan2(mx, -mz);
+      const fx = Math.sin(this.yaw),  fz = Math.cos(this.yaw);
+      const rx = -Math.cos(this.yaw), rz = Math.sin(this.yaw);
+      this.velocity.x = (fx * -nz + rx * nx) * speed;
+      this.velocity.z = (fz * -nz + rz * nx) * speed;
+      // Face the direction of travel (shortest arc, frame-rate independent)
+      const targetYaw = Math.atan2(this.velocity.x, this.velocity.z);
+      let dYaw = targetYaw - this._mesh.rotation.y;
+      dYaw = Math.atan2(Math.sin(dYaw), Math.cos(dYaw));
+      this._mesh.rotation.y += dYaw * (1 - Math.exp(-12 * dt));
     } else {
       this.velocity.x *= 0.8;
       this.velocity.z *= 0.8;
@@ -133,13 +172,24 @@ export class Player {
     this.onGround = false;
     this.position.addScaledVector(this.velocity, dt);
 
-    // Step up: if blocked horizontally but voxel above is clear, climb
-    const footVox = Math.floor((this.position.y) / VS);
-    const fwdVox  = { x: Math.round(this.position.x/VS + this.velocity.x*0.5), z: Math.round(this.position.z/VS + this.velocity.z*0.5) };
-    if (this._world.isSolid(fwdVox.x, footVox, fwdVox.z) &&
-        !this._world.isSolid(fwdVox.x, footVox+1, fwdVox.z) &&
-        !this._world.isSolid(fwdVox.x, footVox+2, fwdVox.z)) {
-      this.position.y += VS * 0.5;
+    // Ground-follow & step: while grounded, snap to the local voxel-top within
+    // STEP_UP. Sampling slightly ahead of the body lifts the player over a step
+    // before the wall collision can block it; the centre column handles walking
+    // down so descending stays grounded instead of free-falling each voxel.
+    if (wasGrounded && this.velocity.y <= 0) {
+      let gy = this._groundY(this.position.x, this.position.z);
+      const hSpeed = Math.hypot(this.velocity.x, this.velocity.z);
+      if (hSpeed > 0.01) {
+        const look = P_RADIUS + VS * 0.3;
+        const ga = this._groundY(this.position.x + this.velocity.x / hSpeed * look,
+                                 this.position.z + this.velocity.z / hSpeed * look);
+        if (ga !== null && ga > this.position.y && ga - this.position.y <= STEP_UP) gy = ga;
+      }
+      if (gy !== null && Math.abs(gy - this.position.y) <= STEP_UP) {
+        this.position.y = gy;
+        this.velocity.y = 0;
+        this.onGround = true;
+      }
     }
 
     this._resolveCollision();
@@ -148,21 +198,29 @@ export class Player {
     const minY = SEA_LEVEL * VS + VS * 0.2;
     if (this.position.y < minY) { this.position.y = minY; this.velocity.y = 0; this.onGround = true; }
 
-    // Update visual mesh
-    this._mesh.position.copy(this.position);
+    // Update visual mesh — Y smoothed so snapped physics steps don't pop
+    this._visualY += (this.position.y - this._visualY) * (1 - Math.exp(-14 * dt));
+    if (Math.abs(this.position.y - this._visualY) > STEP_UP * 2) this._visualY = this.position.y;
+    this._mesh.position.set(this.position.x, this._visualY, this.position.z);
 
-    // Third-person camera
+    // Walk / idle / airborne animation
+    animateHumanoid(this._parts, this._anim, dt, {
+      speed:    Math.hypot(this.velocity.x, this.velocity.z),
+      grounded: this.onGround,
+    });
+
+    // Third-person camera (follows the smoothed Y)
     const camX = this.position.x - Math.sin(this.yaw) * Math.cos(this.pitch) * CAM_DIST;
-    let   camY = this.position.y + P_HEIGHT + CAM_HI + Math.sin(this.pitch) * CAM_DIST;
+    let   camY = this._visualY + P_HEIGHT + CAM_HI + Math.sin(this.pitch) * CAM_DIST;
     const camZ = this.position.z - Math.cos(this.yaw) * Math.cos(this.pitch) * CAM_DIST;
     // Keep the camera above the terrain so it never clips into hills
     const camSurf = (this._world.getSurfaceY(Math.round(camX/VS), Math.round(camZ/VS)) + 1.5) * VS;
     if (camY < camSurf) camY = camSurf;
     this._camTarget.set(camX, camY, camZ);
-    this._camera.position.lerp(this._camTarget, DAMP + dt * 3);
+    this._camera.position.lerp(this._camTarget, 1 - Math.exp(-8 * dt));
     this._camera.lookAt(
       this.position.x,
-      this.position.y + P_HEIGHT * 0.7,
+      this._visualY + P_HEIGHT * 0.7,
       this.position.z,
     );
   }

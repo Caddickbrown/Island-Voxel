@@ -2,6 +2,7 @@
 // Ported and adapted from Island's npcs.js
 import * as THREE from 'three';
 import { VS } from './world.js';
+import { mat, buildHumanoid } from './character.js';
 
 // ─── Simulated clock ─────────────────────────────────────────────────────────
 const SIM_SPEED   = 6;   // 1 real second = 6 sim minutes
@@ -20,25 +21,6 @@ function getScheduleEntry(schedule, hour) {
   return { area: schedule[0][2], activity: schedule[0][3] };
 }
 
-// ── Shared body materials (lazy singletons, no ??= for Safari compat) ────────
-const _matCache = new Map();
-function mat(hex) {
-  if (!_matCache.has(hex)) _matCache.set(hex, new THREE.MeshLambertMaterial({ color: hex }));
-  return _matCache.get(hex);
-}
-
-// Convenience shortcuts (called as M.white() etc)
-const M = {
-  white:  () => mat(0xf5f5f5),
-  cream:  () => mat(0xf0e8d0),
-  tan:    () => mat(0xc8a070),
-  brown:  () => mat(0x7a4e18),
-  grey:   () => mat(0x888888),
-  red:    () => mat(0xd03020),
-  blue:   () => mat(0x3a90c8),
-  yellow: () => mat(0xf0c000),
-  black:  () => mat(0x222222),
-};
 const LABEL_DIST = 16; // VS units — show label within this distance
 
 export class NPC {
@@ -58,39 +40,15 @@ export class NPC {
     // Build voxel → world-pos helper
     this._areaPositions = {}; // area key → THREE.Vector3
 
-    // ── Mesh (blocky humanoid) ───────────────────────────────────────────────
-    this.group = new THREE.Group();
-    const skin  = mat(def.skinTone !== undefined ? def.skinTone : 0xd4956a);
-    const hair  = mat(def.hairColor !== undefined ? def.hairColor : 0x3d1a00);
-    const shirt = mat(def.color);
-    const pants = mat(this._darken(def.color, 0.65));
-    const shoe  = mat(0x2a1a0a);
-
-    // Head
-    const head = new THREE.Mesh(new THREE.BoxGeometry(.7*VS,.7*VS,.7*VS), skin);
-    head.position.y = 1.9*VS;
-    // Hair (top slab)
-    const hairM = new THREE.Mesh(new THREE.BoxGeometry(.75*VS,.25*VS,.75*VS), hair);
-    hairM.position.y = 2.3*VS;
-    // Body
-    const body = new THREE.Mesh(new THREE.BoxGeometry(.7*VS,.9*VS,.4*VS), shirt);
-    body.position.y = 1.15*VS;
-    // Arms
-    const armGeo = new THREE.BoxGeometry(.28*VS,.8*VS,.28*VS);
-    const armL = new THREE.Mesh(armGeo, shirt); armL.position.set(-.52*VS,1.15*VS,0);
-    const armR = new THREE.Mesh(armGeo, shirt); armR.position.set( .52*VS,1.15*VS,0);
-    // Legs
-    const legGeo = new THREE.BoxGeometry(.3*VS,.85*VS,.3*VS);
-    const legL = new THREE.Mesh(legGeo, pants); legL.position.set(-.2*VS,.48*VS,0);
-    const legR = new THREE.Mesh(legGeo, pants); legR.position.set( .2*VS,.48*VS,0);
-    // Feet
-    const footGeo = new THREE.BoxGeometry(.3*VS,.2*VS,.42*VS);
-    const footL = new THREE.Mesh(footGeo, shoe); footL.position.set(-.2*VS,.1*VS,.07*VS);
-    const footR = new THREE.Mesh(footGeo, shoe); footR.position.set( .2*VS,.1*VS,.07*VS);
-
-    this.group.add(head, hairM, body, armL, armR, legL, legR, footL, footR);
-    this._armL = armL; this._armR = armR;
-    this._legL = legL; this._legR = legR;
+    // ── Mesh (blocky humanoid, shared with the player) ───────────────────────
+    const { group, parts } = buildHumanoid({
+      skinTone:   def.skinTone,
+      hairColor:  def.hairColor,
+      shirtColor: def.color,
+    });
+    this.group = group;
+    this._armL = parts.armL; this._armR = parts.armR;
+    this._legL = parts.legL; this._legR = parts.legR;
 
     // Label (canvas sprite)
     this._label = this._makeLabel();
@@ -99,7 +57,7 @@ export class NPC {
     this.group.add(this._label);
 
     // Add job accessory
-    this._addAccessory(def.job, skin);
+    this._addAccessory(def.job);
 
     scene.add(this.group);
 
@@ -111,11 +69,6 @@ export class NPC {
     this._idleTimer   = 0;
     this._dialogueIdx = 0;
     this._labelActivity = null; // last activity drawn on the label
-  }
-
-  _darken(hex, f) {
-    const r=((hex>>16)&0xff)*f, g=((hex>>8)&0xff)*f, b=(hex&0xff)*f;
-    return (Math.round(r)<<16)|(Math.round(g)<<8)|Math.round(b);
   }
 
   _makeLabel() {
@@ -151,7 +104,7 @@ export class NPC {
     if (this._labelTex) this._labelTex.needsUpdate = true;
   }
 
-  _addAccessory(job, skin) {
+  _addAccessory(job) {
     let acc = null;
     switch(job) {
       case 'Baker':      acc = new THREE.Mesh(new THREE.CylinderGeometry(.22*VS,.3*VS,.4*VS,8), mat(0xffffff)); acc.position.y=2.6*VS; break;
