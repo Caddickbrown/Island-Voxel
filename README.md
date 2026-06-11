@@ -51,4 +51,5 @@ then open `index.html`. Three.js is loaded from a CDN import map.
 
 🚧 Playable walking sim: streamed island terrain with snow-capped mountain, town
 and harbour, day/night cycle with clouds and stars, 22 schedule-driven NPCs with
-dialogue, wildlife, and keyboard/mouse/touch/gamepad input.
+dialogue, wildlife, and keyboard/mouse/touch/gamepad input. Start/pause menu
+(Esc / Start / ⚙) with an invert-camera-Y option, persisted across sessions.

@@ -19,6 +19,30 @@
     #loading .track { width:200px; height:1px; background:rgba(255,255,255,.12); margin-top:16px; }
     #loading .fill  { height:1px; background:rgba(255,255,255,.65); width:0%; transition:width .3s; }
 
+    #menu {
+      position:fixed; inset:0; z-index:150; display:none;
+      flex-direction:column; align-items:center; justify-content:center;
+      background:rgba(4,16,30,.78); backdrop-filter:blur(10px);
+      color:#fff; letter-spacing:3px;
+    }
+    #menu h1 { font-size:22px; font-weight:normal; letter-spacing:8px; margin-bottom:30px; }
+    #menu button {
+      font:14px Georgia; letter-spacing:4px; color:#fff; cursor:pointer;
+      background:rgba(255,255,255,.12); border:1px solid rgba(255,255,255,.45);
+      border-radius:8px; padding:12px 46px;
+    }
+    #menu button:hover { background:rgba(255,255,255,.25); }
+    #menu .opt { display:flex; gap:10px; align-items:center; margin-top:26px;
+      font:13px Georgia; letter-spacing:1px; color:rgba(255,255,255,.85); cursor:pointer; }
+    #menu .opt input { width:16px; height:16px; cursor:pointer; }
+    #menu .mcontrols { margin-top:30px; font:11px monospace; letter-spacing:1px;
+      color:rgba(255,255,255,.5); line-height:2.1; text-align:center; }
+    #gear { position:absolute; top:14px; left:14px; pointer-events:auto;
+      width:36px; height:36px; border-radius:50%; font-size:17px;
+      background:rgba(0,0,0,.32); border:1px solid rgba(255,255,255,.3);
+      color:rgba(255,255,255,.85); display:flex; align-items:center; justify-content:center;
+      cursor:pointer; user-select:none; backdrop-filter:blur(6px); }
+
     #hud { position:fixed; inset:0; pointer-events:none; z-index:10; }
     #title { position:absolute; top:14px; left:50%; transform:translateX(-50%);
       font-size:16px; letter-spacing:5px; color:rgba(255,255,255,.9);
@@ -78,8 +102,20 @@
 
   <canvas id="c"></canvas>
 
+  <div id="menu">
+    <h1>ISLAND</h1>
+    <button id="menu-resume">BEGIN</button>
+    <label class="opt"><input type="checkbox" id="opt-invert"> Invert camera Y&nbsp; <span style="opacity:.5">(mouse · touch · controller)</span></label>
+    <div class="mcontrols">
+      WASD / left stick — move &nbsp;·&nbsp; mouse / right stick — look<br>
+      Shift / L3 — run &nbsp;·&nbsp; Space / A — jump &nbsp;·&nbsp; E / X — talk<br>
+      Esc / Start — menu
+    </div>
+  </div>
+
   <div id="hud">
     <div id="title">ISLAND</div>
+    <div id="gear" title="Menu (Esc)">⚙</div>
     <div id="time">08:00</div>
     <div id="area"></div>
     <div id="stats"></div>
@@ -153,6 +189,44 @@
     input     = new Input(canvas);
     entities  = new EntityManager();
     npcMgr    = new NPCManager(renderer.scene, world, AREAS);
+
+    // ── Start / pause menu & settings ─────────────────────────────────────────
+    const menuEl    = document.getElementById('menu');
+    const resumeBtn = document.getElementById('menu-resume');
+    const invertEl  = document.getElementById('opt-invert');
+    let menuOpen = false, gameStarted = false;
+
+    input.invertY = localStorage.getItem('island.invertY') === '1';
+    invertEl.checked = input.invertY;
+    invertEl.addEventListener('change', () => {
+      input.invertY = invertEl.checked;
+      localStorage.setItem('island.invertY', invertEl.checked ? '1' : '0');
+    });
+
+    function openMenu() {
+      menuOpen = true;
+      menuEl.style.display = 'flex';
+      if (document.pointerLockElement) document.exitPointerLock();
+    }
+    function closeMenu() {
+      menuOpen = false;
+      menuEl.style.display = 'none';
+      if (!gameStarted) { gameStarted = true; resumeBtn.textContent = 'RESUME'; }
+    }
+    resumeBtn.addEventListener('click', () => {
+      closeMenu();
+      if (!document.body.classList.contains('touch')) {
+        // May reject during Chrome's post-Esc cooldown; clicking the canvas locks
+        const p = canvas.requestPointerLock();
+        if (p && p.catch) p.catch(() => {});
+      }
+    });
+    document.getElementById('gear').addEventListener('click', () => { if (!menuOpen) openMenu(); });
+    // Esc under pointer lock never reaches keydown — the browser eats it while
+    // releasing the lock — so the pause menu opens off the lock change instead
+    document.addEventListener('pointerlockchange', () => {
+      if (gameStarted && !document.pointerLockElement && !menuOpen) openMenu();
+    });
 
     setStatus('generating terrain…', 10);
     await defer(() => {}, 10);
@@ -257,6 +331,7 @@
     setStatus('ready', 100);
     await new Promise(r => setTimeout(r, 300));
     document.getElementById('loading').style.display = 'none';
+    openMenu(); // start menu — BEGIN closes it and (on desktop) grabs the pointer
 
     // ── Area proximity detection ───────────────────────────────────────────────
     let _lastArea = '', _areaTimer = 0;
@@ -298,39 +373,47 @@
       if (fpsA >= 1) { fps = Math.round(fpsN / fpsA); fpsA = 0; fpsN = 0; }
 
       input.update();
-      player.update(dt);
-      entities.update(dt, now);
-      // Drive NPC schedules from the day/night clock so routines match the HUD
-      npcMgr.update(dt, now, player.position, dayNight.gameTime * 24);
-      water.update(dt);
-      dayNight.update(dt, player.position);
 
-      // Interaction — talk to nearby NPC
-      if (input.wasPressed('interact')) {
-        const nearby = npcMgr.getNearby(player.position);
-        if (nearby) {
-          const { name, job, line } = nearby.getDialogue(DIALOGUE);
-          showDialogue(name, job, line);
+      // Esc / Start / ⚙ toggles the menu and pauses the world
+      if (input.wasPressed('pause')) menuOpen ? closeMenu() : openMenu();
+
+      if (menuOpen) {
+        input.consumeLook(); // don't bank look deltas while paused
+      } else {
+        player.update(dt);
+        entities.update(dt, now);
+        // Drive NPC schedules from the day/night clock so routines match the HUD
+        npcMgr.update(dt, now, player.position, dayNight.gameTime * 24);
+        water.update(dt);
+        dayNight.update(dt, player.position);
+
+        // Interaction — talk to nearby NPC
+        if (input.wasPressed('interact')) {
+          const nearby = npcMgr.getNearby(player.position);
+          if (nearby) {
+            const { name, job, line } = nearby.getDialogue(DIALOGUE);
+            showDialogue(name, job, line);
+          }
         }
-      }
 
-      // Interact prompt — checked a few times a second, not every frame
-      _promptTimer -= dt;
-      if (_promptTimer <= 0) {
-        _promptTimer = 0.2;
-        const nearby = npcMgr.getNearby(player.position);
-        if (nearby) {
-          promptEl.innerHTML = `<b>E</b> — Talk to ${nearby.name}`;
-          promptEl.style.display = 'block';
-          interactBtn.style.background = 'rgba(255,215,0,.4)';
-        } else {
-          promptEl.style.display = 'none';
-          interactBtn.style.background = 'rgba(255,255,255,.18)';
+        // Interact prompt — checked a few times a second, not every frame
+        _promptTimer -= dt;
+        if (_promptTimer <= 0) {
+          _promptTimer = 0.2;
+          const nearby = npcMgr.getNearby(player.position);
+          if (nearby) {
+            promptEl.innerHTML = `<b>E</b> — Talk to ${nearby.name}`;
+            promptEl.style.display = 'block';
+            interactBtn.style.background = 'rgba(255,215,0,.4)';
+          } else {
+            promptEl.style.display = 'none';
+            interactBtn.style.background = 'rgba(255,255,255,.18)';
+          }
         }
-      }
 
-      // Chunk streaming — feed player position in voxel coords
-      loader.tick(player.position.x / VS, player.position.z / VS, VIEW_DIST);
+        // Chunk streaming — feed player position in voxel coords
+        loader.tick(player.position.x / VS, player.position.z / VS, VIEW_DIST);
+      }
 
       renderer.render();
 
@@ -347,8 +430,8 @@
       }
       checkArea();
 
-      // Controls hint fade-out
-      if (_hintTimer > 0) {
+      // Controls hint fade-out (paused while the menu is up)
+      if (!menuOpen && _hintTimer > 0) {
         _hintTimer -= dt;
         if (_hintTimer <= 0) { hintEl.style.opacity = '0'; setTimeout(() => hintEl.remove(), 1100); }
       }

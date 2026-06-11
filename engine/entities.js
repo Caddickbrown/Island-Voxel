@@ -38,6 +38,29 @@ const M = {
 };
 const B = (w,h,d,m) => new THREE.Mesh(new THREE.BoxGeometry(w*VS,h*VS,d*VS), m());
 
+// Trot cycle for four-legged wildlife — diagonal leg pairs swing in
+// opposition; rate 0 eases the legs back to rest. Caller owns _walkPhase.
+function animateQuadruped(legs, ent, dt, rate, amp) {
+  if (rate > 0) {
+    ent._walkPhase += dt * rate;
+    const s = Math.sin(ent._walkPhase) * amp;
+    legs[0].rotation.x = s; legs[3].rotation.x = s;
+    legs[1].rotation.x = -s; legs[2].rotation.x = -s;
+  } else {
+    const f = 1 - Math.exp(-10 * dt);
+    for (const leg of legs) leg.rotation.x += (0 - leg.rotation.x) * f;
+  }
+}
+
+// Ease the mesh onto the terrain surface instead of snapping a full voxel
+// at column boundaries (teleport-snaps if somehow far off, e.g. first frame)
+function followGround(ent, world, dt, lift) {
+  const gx = Math.round(ent.mesh.position.x / VS), gz = Math.round(ent.mesh.position.z / VS);
+  const ty = world.getSurfaceY(gx, gz) * VS + lift;
+  const cy = ent.mesh.position.y;
+  ent.mesh.position.y = Math.abs(ty - cy) > 2 * VS ? ty : cy + (ty - cy) * (1 - Math.exp(-10 * dt));
+}
+
 // ── Seagull ──────────────────────────────────────────────────────────────────
 export class Seagull extends Entity {
   constructor(scene, wx, wy, wz) {
@@ -77,21 +100,29 @@ export class Sheep extends Entity {
     for(const[bx,bz]of[[0,.5],[.4,0],[-.4,0],[0,-.5]]){const b=B(.7,.5,.7,M.cream);b.position.set(bx*VS,1.4*VS,bz*VS);this.mesh.add(b);}
     this.head=B(.5,.55,.6,M.tan); this.head.position.set(0,1.1*VS,1.3*VS); this.mesh.add(this.head);
     this.mesh.add(B(.3,.3,.3,M.tan)); // snout stub
-    for(const[lx,,lz]of[[-.55,0,-.7],[.55,0,-.7],[-.55,0,.7],[.55,0,.7]]){const leg=B(.3,.7,.3,M.tan);leg.position.set(lx*VS,.35*VS,lz*VS);this.mesh.add(leg);}
+    this._legs=[];
+    for(const[lx,,lz]of[[-.55,0,-.7],[.55,0,-.7],[-.55,0,.7],[.55,0,.7]]){const leg=B(.3,.7,.3,M.tan);leg.position.set(lx*VS,.35*VS,lz*VS);this.mesh.add(leg);this._legs.push(leg);}
     this._tx=wx; this._tz=wz; this._timer=2+Math.random()*4;
+    this._walkPhase=Math.random()*Math.PI*2;
     const sy=world.getSurfaceY(Math.round(wx),Math.round(wz));
     this.mesh.position.set(wx*VS,(sy+.1)*VS,wz*VS);
   }
   update(dt, now) {
     this._timer-=dt;
     if(this._timer<=0){ this._tx=this._homeX+(Math.random()-.5)*24; this._tz=this._homeZ+(Math.random()-.5)*24; this._timer=2+Math.random()*4; }
-    const dx=(this._tx-this._homeX)*VS+this._homeX*VS-this.mesh.position.x;
-    const dz=(this._tz-this._homeZ)*VS+this._homeZ*VS-this.mesh.position.z;
+    const dx=this._tx*VS-this.mesh.position.x;
+    const dz=this._tz*VS-this.mesh.position.z;
     const dist=Math.sqrt(dx*dx+dz*dz);
-    if(dist>.8*VS){this.mesh.position.x+=dx/dist*1.2*VS*dt;this.mesh.position.z+=dz/dist*1.2*VS*dt;this.mesh.rotation.y=Math.atan2(dx,dz);}
-    else this.head.rotation.x=Math.sin(now*.0015)*.3;
-    const gx=Math.round(this.mesh.position.x/VS),gz=Math.round(this.mesh.position.z/VS);
-    this.mesh.position.y=this._world.getSurfaceY(gx,gz)*VS+.1;
+    if(dist>.8*VS){
+      this.mesh.position.x+=dx/dist*1.2*VS*dt;
+      this.mesh.position.z+=dz/dist*1.2*VS*dt;
+      this.mesh.rotation.y=Math.atan2(dx,dz);
+      animateQuadruped(this._legs,this,dt,9,.4);
+    } else {
+      this.head.rotation.x=Math.sin(now*.0015)*.3;
+      animateQuadruped(this._legs,this,dt,0,0);
+    }
+    followGround(this,this._world,dt,.1);
   }
 }
 
@@ -106,21 +137,29 @@ export class Deer extends Entity {
     this.hG.add(B(.45,.5,.65,M.tan));
     for(const[dx,,dz]of[[-.28,0,-.05],[.28,0,-.05]]){const a=B(.08,.7,.08,M.brown);a.position.set(dx*VS,.7*VS,dz*VS);this.hG.add(a);}
     this.mesh.add(this.hG);
-    for(const[lx,,lz]of[[-.35,0,-.7],[.35,0,-.7],[-.35,0,.7],[.35,0,.7]]){const leg=B(.28,1,.28,M.tan);leg.position.set(lx*VS,.5*VS,lz*VS);this.mesh.add(leg);}
+    this._legs=[];
+    for(const[lx,,lz]of[[-.35,0,-.7],[.35,0,-.7],[-.35,0,.7],[.35,0,.7]]){const leg=B(.28,1,.28,M.tan);leg.position.set(lx*VS,.5*VS,lz*VS);this.mesh.add(leg);this._legs.push(leg);}
     this._tx=wx; this._tz=wz; this._wt=3+Math.random()*8;
+    this._walkPhase=Math.random()*Math.PI*2;
     const sy=world.getSurfaceY(Math.round(wx),Math.round(wz));
     this.mesh.position.set(wx*VS,(sy+.1)*VS,wz*VS);
   }
   update(dt, now) {
     this._wt-=dt;
     if(this._wt<=0){this._tx=this._homeX+(Math.random()-.5)*34;this._tz=this._homeZ+(Math.random()-.5)*34;this._wt=4+Math.random()*10;}
-    const dx=(this._tx*VS)-(this.mesh.position.x-this._homeX*VS+(this._homeX*VS));
-    const dz=(this._tz*VS)-(this.mesh.position.z-this._homeZ*VS+(this._homeZ*VS));
+    const dx=this._tx*VS-this.mesh.position.x;
+    const dz=this._tz*VS-this.mesh.position.z;
     const dist=Math.sqrt(dx*dx+dz*dz);
-    if(dist>VS){this.mesh.position.x+=dx/dist*1.8*VS*dt;this.mesh.position.z+=dz/dist*1.8*VS*dt;this.mesh.rotation.y=Math.atan2(dx,dz);}
-    else this.hG.rotation.x=Math.sin(now*.0012)*.35;
-    const gx=Math.round(this.mesh.position.x/VS),gz=Math.round(this.mesh.position.z/VS);
-    this.mesh.position.y=this._world.getSurfaceY(gx,gz)*VS+.1;
+    if(dist>VS){
+      this.mesh.position.x+=dx/dist*1.8*VS*dt;
+      this.mesh.position.z+=dz/dist*1.8*VS*dt;
+      this.mesh.rotation.y=Math.atan2(dx,dz);
+      animateQuadruped(this._legs,this,dt,7,.45);
+    } else {
+      this.hG.rotation.x=Math.sin(now*.0012)*.35;
+      animateQuadruped(this._legs,this,dt,0,0);
+    }
+    followGround(this,this._world,dt,.1);
   }
 }
 

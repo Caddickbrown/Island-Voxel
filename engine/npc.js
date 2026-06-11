@@ -2,7 +2,7 @@
 // Ported and adapted from Island's npcs.js
 import * as THREE from 'three';
 import { VS } from './world.js';
-import { mat, buildHumanoid } from './character.js';
+import { mat, buildHumanoid, animateHumanoid } from './character.js';
 
 // ─── Simulated clock ─────────────────────────────────────────────────────────
 const SIM_SPEED   = 6;   // 1 real second = 6 sim minutes
@@ -46,9 +46,8 @@ export class NPC {
       hairColor:  def.hairColor,
       shirtColor: def.color,
     });
-    this.group = group;
-    this._armL = parts.armL; this._armR = parts.armR;
-    this._legL = parts.legL; this._legR = parts.legR;
+    this.group  = group;
+    this._parts = parts;
 
     // Label (canvas sprite)
     this._label = this._makeLabel();
@@ -65,7 +64,7 @@ export class NPC {
     this._targetPos   = null; // THREE.Vector3 world-space target
     this._currentArea = null;
     this._isMoving    = false;
-    this._walkPhase   = Math.random() * Math.PI * 2;
+    this._anim        = { walkPhase: Math.random() * Math.PI * 2 };
     this._idleTimer   = 0;
     this._dialogueIdx = 0;
     this._labelActivity = null; // last activity drawn on the label
@@ -105,17 +104,20 @@ export class NPC {
   }
 
   _addAccessory(job) {
-    let acc = null;
+    let acc = null, onHead = true;
     switch(job) {
       case 'Baker':      acc = new THREE.Mesh(new THREE.CylinderGeometry(.22*VS,.3*VS,.4*VS,8), mat(0xffffff)); acc.position.y=2.6*VS; break;
       case 'Postman':    acc = new THREE.Mesh(new THREE.BoxGeometry(.5*VS,.2*VS,.5*VS), mat(0xcc1111));         acc.position.y=2.5*VS; break;
       case 'Farmer':     acc = new THREE.Mesh(new THREE.CylinderGeometry(.4*VS,.4*VS,.15*VS,8), mat(0x8b6914)); acc.position.y=2.55*VS; break;
       case 'Fisherman':  acc = new THREE.Mesh(new THREE.BoxGeometry(.4*VS,.15*VS,.4*VS), mat(0x334466));        acc.position.y=2.5*VS; break;
-      case 'Botanist':   acc = new THREE.Mesh(new THREE.BoxGeometry(.12*VS,.6*VS,.12*VS), mat(0x3a6e3a));       acc.position.set(.55*VS,1.4*VS,.15*VS); break;
+      case 'Botanist':   acc = new THREE.Mesh(new THREE.BoxGeometry(.12*VS,.6*VS,.12*VS), mat(0x3a6e3a));       acc.position.set(.55*VS,1.4*VS,.15*VS); onHead = false; break;
       case 'Engineer':   acc = new THREE.Mesh(new THREE.BoxGeometry(.8*VS,.2*VS,.6*VS), mat(0xf0a000));         acc.position.y=2.5*VS; break;
       case 'Keeper':     acc = new THREE.Mesh(new THREE.CylinderGeometry(.25*VS,.28*VS,.3*VS,8), mat(0x334466)); acc.position.y=2.55*VS; break;
     }
-    if (acc) this.group.add(acc);
+    if (!acc) return;
+    // Hats parent to the head (converted to head-local Y) so they bob with it
+    if (onHead) { acc.position.y -= this._parts.head.position.y; this._parts.head.add(acc); }
+    else this.group.add(acc);
   }
 
   // Set the AREAS position cache (called after world is generated)
@@ -142,42 +144,37 @@ export class NPC {
     }
 
     // Walk toward target
+    let speed = 0;
     if (this._isMoving && this._targetPos) {
       const dx = this._targetPos.x - this.group.position.x;
       const dz = this._targetPos.z - this.group.position.z;
       const dist = Math.sqrt(dx*dx+dz*dz);
 
       if (dist > 0.8*VS) {
-        const speed = 2.8 * VS;
+        speed = 2.8 * VS;
         this.group.position.x += (dx/dist) * speed * dt;
         this.group.position.z += (dz/dist) * speed * dt;
         this.group.rotation.y = Math.atan2(dx, dz);
 
-        // Walking animation
-        this._walkPhase += dt * 7;
-        const swing = Math.sin(this._walkPhase) * 0.55;
-        this._armL.rotation.x =  swing;
-        this._armR.rotation.x = -swing;
-        this._legL.rotation.x = -swing * 0.8;
-        this._legR.rotation.x =  swing * 0.8;
-
-        // Snap Y to terrain
+        // Follow terrain — eased so voxel steps don't pop the mesh
         const gx = Math.round(this.group.position.x/VS);
         const gz = Math.round(this.group.position.z/VS);
-        const sy = this._world.getSurfaceY(gx, gz);
-        this.group.position.y = sy * VS + 0.05;
+        const ty = this._world.getSurfaceY(gx, gz) * VS + 0.05;
+        const cy = this.group.position.y;
+        this.group.position.y = Math.abs(ty - cy) > 2*VS
+          ? ty : cy + (ty - cy) * (1 - Math.exp(-10 * dt));
       } else {
         this._isMoving = false;
-        this._armL.rotation.x = 0; this._armR.rotation.x = 0;
-        this._legL.rotation.x = 0; this._legR.rotation.x = 0;
-        // Idle: gentle sway
-        this._idleTimer += dt;
-        const sway = Math.sin(this._idleTimer * 0.8 + this._walkPhase) * 0.04;
-        this.group.rotation.y += sway * dt;
       }
-    } else {
-      this._idleTimer += dt;
     }
+    if (speed === 0) {
+      // Idle: gentle sway
+      this._idleTimer += dt;
+      const sway = Math.sin(this._idleTimer * 0.8 + this._anim.walkPhase) * 0.04;
+      this.group.rotation.y += sway * dt;
+    }
+    // Shared limb animation (walk swing + bob, or breathing at rest)
+    animateHumanoid(this._parts, this._anim, dt, { speed });
 
     // Label visibility — show when player is close
     if (playerPos) {

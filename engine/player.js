@@ -35,11 +35,11 @@ export class Player {
       hairColor:  0x4a2c12,
       castShadow: true,
     });
-    // Satchel across the back
+    // Satchel across the back — child of the torso so it bobs and leans with it
     const satchel = new THREE.Mesh(new THREE.BoxGeometry(.5*VS,.55*VS,.18*VS), mat(0x7a4e18));
-    satchel.position.set(0, 1.1*VS, -.31*VS);
+    satchel.position.set(0, -.05*VS, -.31*VS);
     satchel.castShadow = true;
-    bodyGroup.add(satchel);
+    parts.body.add(satchel);
     bodyGroup.scale.setScalar(P_HEIGHT / HUMANOID_HEIGHT);
     this._mesh.add(bodyGroup);
     renderer.scene.add(this._mesh);
@@ -131,9 +131,11 @@ export class Player {
 
   update(dt) {
     const input = this._input;
+    // Standard (non-inverted) look: pushing up looks up, i.e. lowers the orbit
+    // camera. Input negates dy when the user enables "invert Y" in the menu.
     const { dx: ldx, dy: ldy } = input.consumeLook();
     this.yaw   -= ldx;
-    this.pitch  = Math.max(-0.5, Math.min(0.8, this.pitch - ldy));
+    this.pitch  = Math.max(-0.5, Math.min(0.8, this.pitch + ldy));
 
     const wasGrounded = this.onGround;
 
